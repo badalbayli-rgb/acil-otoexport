@@ -5672,7 +5672,7 @@ ${consults || "-"}
     const surgery = aoeSurgeryInfo(p);
     return {
       name: clean(p.adSoyad || ""),
-      diagnosis: clean(consultFacts.diagnosis || p.tani || ""),
+      diagnosis: clean(consultFacts.diagnosis || ""),
       operation: clean(meta.go || p.plannedOperation || consultFacts.go || ""),
       plan: clean(p.plan || ""),
       admission: aoeDate(p.yatis || ""),
@@ -5807,20 +5807,22 @@ ${consults || "-"}
     const nursing = nursingRows.map((x) =>
       "<div class=\"nursing-item\"><b>(" + aoeEsc(aoeDate(x.date) || "—") + ")</b> " + aoeEsc(x.text) + "</div>"
     ).join("") || "—";
-    const imaging = (p.radiology || []).filter((x) => aoeImagingName(x)).map((x) =>
-      "<div>" + aoeEsc(aoeDate(x.date || x.reportDate) || "—") + ": <b>" +
-      aoeEsc(aoeImagingName(x)) + "</b>" +
-      ((x.reportText || x.report) ? "<br>" + aoeEsc(x.reportText || x.report) : "") + "</div>"
+    const imaging = (p.radiology || []).filter((x) => aoeImagingName(x)).map((x) => {
+      const report = cleanMultiline(x.reportText || x.report || "");
+      return "<div class=\"imaging-item" + (report ? " has-report" : "") + "\"><b>" +
+        aoeEsc(aoeDate(x.date || x.reportDate) || "—") + ": " + aoeEsc(aoeImagingName(x)) + "</b>" +
+        (report ? "<br>" + aoeEsc(report) : "") + "</div>";
+    }
     ).join("") || "—";
     const consults = (p.consults || []).filter((x) => clean(x.answer)).map((x) =>
-      "<div class=\"consult-item\">(" + aoeEsc(aoeDate(x.date) || "—") + ") <b>" + aoeEsc(x.unit || "Konsültasyon") +
+      "<div class=\"consult-item\"><b>(" + aoeEsc(aoeDate(x.date) || "—") + ") " + aoeEsc(x.unit || "Konsültasyon") +
       "</b><br>" + aoeEsc(x.answer) + "</div>"
     ).join("") || "—";
     const labTable = typeof visitLabTableHtml === "function"
       ? visitLabTableHtml(p.labs || {}, latestVitalLine(p.vitals || [], p)) : "";
     return '<section class="patient">' +
       '<div class="patient-title">' + aoeEsc(title) + '</div><div class="section-gap">&nbsp;</div>' +
-      '<div><b>TANI:</b> ' + aoeEsc(fixed.diagnosis || "—") + '</div>' +
+      '<div><b>TANI:</b> ' + aoeEsc(fixed.diagnosis || "") + '</div>' +
       '<div><b>OP:</b> ' + aoeEsc(fixed.operation || "—") + '</div>' +
       '<div><b>PLAN:</b> ' + aoeEsc(fixed.plan || "—") + '</div>' +
       '<div><b>POSTOP-REJİM:</b> ' + aoeEsc(aoePostopRegime(p, surgery, diet)) + '</div>' +
@@ -5878,6 +5880,7 @@ ${consults || "-"}
       '.patient-title{font-size:15pt;line-height:1.0;font-weight:bold;margin:0 0 1pt}' +
       '.clinic-heading{text-align:center;font-size:12pt;font-weight:bold;margin:0 0 8pt;border-bottom:1px solid #555;padding-bottom:2pt}' +
       '.consult-item+.consult-item,.nursing-item+.nursing-item{margin-top:9pt!important}' +
+      '.imaging-item.has-report:not(:last-child){margin-bottom:10pt!important}' +
       '.patient div{margin:0;padding:0}.rule{border-top:1px dashed #333;margin:3pt 0!important}' +
       '.labs{font-size:9pt}.imaging,.imaging *{font-size:10pt}.patient b{font-weight:bold}' +
       '.section-gap{font-size:9pt;line-height:9pt;height:9pt}' +
@@ -6003,7 +6006,7 @@ ${consults || "-"}
     const paragraphs = [
       aoeWordParagraph(title, { size:15, bold:true, keep:true }),
       aoeWordParagraph("", { size:9 }),
-      aoeWordParagraph("TANI: " + (fixed.diagnosis || "—"), { size:9, bold:true }),
+      aoeWordParagraph("TANI: " + (fixed.diagnosis || ""), { size:9, bold:true }),
       aoeWordParagraph("OP: " + (fixed.operation || "—"), { size:9, bold:true }),
       aoeWordParagraph("PLAN: " + (fixed.plan || "—"), { size:9, bold:true }),
       aoeWordParagraph("POSTOP-REJİM: " + aoePostopRegime(p, surgery, diet), { size:9, bold:true }),
@@ -6042,7 +6045,7 @@ ${consults || "-"}
     const answeredConsults = (p.consults || []).filter((x) => clean(x.answer));
     answeredConsults.forEach((x, index) => {
       paragraphs.push(aoeWordRichParagraph([
-        { text:"(" + (aoeDate(x.date) || "—") + ") " },
+        { text:"(" + (aoeDate(x.date) || "—") + ") ", bold:true },
         { text:x.unit || "Konsültasyon", bold:true },
         { text:x.answer, breakBefore:true }
       ], { size:9 }));
@@ -6052,11 +6055,15 @@ ${consults || "-"}
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Görüntüleme:", { size:10, bold:true, keep:true }));
     const namedImaging = (p.radiology || []).filter((x) => aoeImagingName(x));
-    namedImaging.forEach((x) => paragraphs.push(aoeWordRichParagraph([
-      { text:(aoeDate(x.date || x.reportDate) || "—") + ": " },
-      { text:aoeImagingName(x), bold:true },
-      ...((x.reportText || x.report) ? [{ text:x.reportText || x.report, breakBefore:true }] : [])
-    ], { size:10 })));
+    namedImaging.forEach((x, index) => {
+      const report = cleanMultiline(x.reportText || x.report || "");
+      paragraphs.push(aoeWordRichParagraph([
+        { text:(aoeDate(x.date || x.reportDate) || "—") + ": ", bold:true },
+        { text:aoeImagingName(x), bold:true },
+        ...(report ? [{ text:report, breakBefore:true }] : [])
+      ], { size:10 }));
+      if (report && index < namedImaging.length - 1) paragraphs.push(aoeWordParagraph("", { size:10 }));
+    });
     if (!namedImaging.length) paragraphs.push(aoeWordParagraph("—", { size:10 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }));
     return paragraphs.join("");
