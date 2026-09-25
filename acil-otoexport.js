@@ -6228,26 +6228,34 @@ ${consults || "-"}
     return true;
   }
 
-  async function aoeDownloadWord() {
-    if (!(await aoeEnsureReady())) return;
+  function aoeSaveDocx(prefix = "Acil-OtoExport") {
     const blob = new Blob([aoeDocxBytes()], { type:"application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "Acil-OtoExport-" + new Date().toISOString().slice(0,10) + ".docx";
+    a.download = prefix + "-" + new Date().toISOString().slice(0,10) + ".docx";
     a.click();
     window.setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    return a.download;
+  }
+
+  async function aoeDownloadWord() {
+    if (!(await aoeEnsureReady())) return;
+    aoeSaveDocx("Acil-OtoExport");
   }
 
   async function aoeGoogleDocs() {
     if (!(await aoeEnsureReady())) return;
-    const body = aoeDocumentHtml().match(/<body>([\s\S]*)<\/body>/i)?.[1] || aoeDocumentHtml();
     try {
-      const ok = await copyEditableHtml(body, "Acil OtoExport — " + state.patients.length + " hasta");
-      if (!ok) throw new Error("Biçimli içerik panoya alınamadı");
-      window.open("https://docs.new", "_blank");
-      alert("Biçimli vizit kağıdı panoya kopyalandı. Açılan Google Dokümanına Ctrl+V ile yapıştırın.");
+      const fileName = aoeSaveDocx("Acil-OtoExport-GoogleDocs");
+      window.open("https://drive.google.com/drive/u/0/my-drive", "_blank");
+      alert(
+        fileName + " indirildi ve Google Drive açıldı.\n\n" +
+        "Drive'da: Yeni → Dosya yükleme → indirilen DOCX'i seçin.\n" +
+        "Yüklenince dosyaya sağ tıklayıp Birlikte aç → Google Dokümanlar seçin.\n\n" +
+        "Bu yöntem punto, kalınlık, tablo ve sütun düzenini Ctrl+V yönteminden çok daha iyi korur."
+      );
     } catch (e) {
-      alert("Google Docs kopyalama başarısız: " + (e?.message || e));
+      alert("Google Docs için DOCX hazırlanamadı: " + (e?.message || e));
     }
   }
 
@@ -6263,7 +6271,7 @@ ${consults || "-"}
       '<button id="aoe-order-clinics" style="grid-column:1/-1;background:#334155;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Klinik Sırasını Ayarla</button>' +
       '<div id="aoe-order-summary" style="grid-column:1/-1;font-size:10px;color:#475569;line-height:1.25"></div>' +
       '<button id="aoe-word-all" style="background:#166534;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Tümünü Word İndir</button>' +
-      '<button id="aoe-docs-all" style="background:#1d4ed8;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Tümünü Google Docs</button>';
+      '<button id="aoe-docs-all" style="background:#1d4ed8;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Google Docs İçin DOCX</button>';
     root.prepend(holder);
     uiEl("aoe-word-all").onclick = aoeDownloadWord;
     uiEl("aoe-docs-all").onclick = aoeGoogleDocs;
