@@ -5692,10 +5692,15 @@ ${consults || "-"}
   }
 
   function aoeFixedManifest() {
+    const current = (state.patients || []).map((p) => ({ keys: aoePatientKeys(p), ...aoeFixedFor(p) }));
+    const currentKeys = new Set(current.flatMap((p) => p.keys || []));
+    const preserved = (state.aoePreviousPatients || []).filter((p) =>
+      !(p.keys || []).some((key) => currentKeys.has(key))
+    );
     return {
-      version: 1,
+      version: 2,
       generatedAt: new Date().toISOString(),
-      patients: (state.patients || []).map((p) => ({ keys: aoePatientKeys(p), ...aoeFixedFor(p) }))
+      patients: [...current, ...preserved]
     };
   }
 
@@ -6110,7 +6115,12 @@ ${consults || "-"}
       lastClinic = key;
       return heading + aoeWordPatient(p);
     }).join("");
-    const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) + groupedPatients;
+    const missingPrevious = aoeMissingPreviousWordPatients();
+    const preservedPatients = missingPrevious.length
+      ? aoeWordParagraph("DOSYADA BULUNAN — AÇIK LİSTEDE OLMAYAN HASTALAR", { size:12, bold:true, align:"center", before:120, after:120, keep:true }) +
+        missingPrevious.map((p) => p.xml).join("")
+      : "";
+    const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) + groupedPatients + preservedPatients;
     const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + body +
       '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1843" w:right="1121" w:bottom="1535" w:left="1005" w:header="720" w:footer="0"/><w:cols w:num="2" w:space="720" w:sep="1"/></w:sectPr></w:body></w:document>';
@@ -6190,29 +6200,112 @@ ${consults || "-"}
     return { version:0, generatedAt:"", patients:patients.filter((p) => p.name) };
   }
 
+  function aoeWordBlockInfo(xml) {
+    try {
+      const doc = new DOMParser().parseFromString(
+        '<root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + xml + '</root>',
+        "application/xml"
+      );
+      const text = Array.from(doc.getElementsByTagName("w:t")).map((x) => x.textContent || "").join("").trim();
+      const sizes = Array.from(doc.getElementsByTagName("w:sz")).map((x) => x.getAttribute("w:val") || x.getAttribute("val") || "");
+      const centered = Array.from(doc.getElementsByTagName("w:jc")).some((x) => (x.getAttribute("w:val") || x.getAttribute("val")) === "center");
+      return { text, sizes, centered };
+    } catch (e) { return { text:"", sizes:[], centered:false }; }
+  }
+
+  function aoeNameFromPatientTitle(title) {
+    const parts = clean(title).split("-").map(clean).filter(Boolean);
+    const lastIsAge = /^\d{1,3}[EK]?$/.test(parts[parts.length - 1] || "");
+    const nameStart = parts.length >= 4 ? 2 : 1;
+    return clean(parts.slice(nameStart, lastIsAge ? -1 : undefined).join("-"));
+  }
+
+  function aoePreviousWordPatients(documentXml) {
+    const body = String(documentXml || "").match(/<w:body[^>]*>([\s\S]*?)<\/w:body>/)?.[1] || "";
+    const blocks = body.match(/<w:p\b[\s\S]*?<\/w:p>|<w:tbl\b[\s\S]*?<\/w:tbl>/g) || [];
+    const result = []; let current = null;
+    const finish = () => {
+      if (current?.name && current.blocks.length) result.push({
+        name:current.name,
+        keys:["ad:" + norm(current.name).replace(/[^a-z0-9çğıöşü]+/g, "")],
+        xml:current.blocks.join("")
+      });
+      current = null;
+    };
+    blocks.forEach((block) => {
+      const info = block.startsWith("<w:p") ? aoeWordBlockInfo(block) : { text:"", sizes:[], centered:false };
+      const isPatientTitle = info.sizes.includes("30") && info.text && info.text !== "ACİL OTOEXPORT";
+      const isClinicHeading = info.sizes.includes("24") && info.centered && info.text;
+      if (isPatientTitle) {
+        finish();
+        current = { name:aoeNameFromPatientTitle(info.text), blocks:[block] };
+      } else if (isClinicHeading && current) {
+        finish();
+      } else if (current) current.blocks.push(block);
+    });
+    finish();
+    return result.filter((p) => p.keys[0] !== "ad:");
+  }
+
+  function aoeMissingPreviousWordPatients() {
+    const currentKeys = new Set((state.patients || []).flatMap((p) => aoePatientKeys(p)));
+    return (state.aoePreviousWordPatients || []).filter((p) =>
+      !(p.keys || []).some((key) => currentKeys.has(key))
+    );
+  }
+
+  function aoeSetOldFileStatus(ok, message) {
+    const status = uiEl("aoe-old-status");
+    const button = uiEl("aoe-load-old");
+    if (status) {
+      status.textContent = message;
+      status.style.background = ok ? "#dcfce7" : "#fee2e2";
+      status.style.color = ok ? "#166534" : "#991b1b";
+      status.style.fontWeight = "bold";
+    }
+    if (button) button.textContent = ok ? "YÜKLENDİ ✓ — Başka DOCX Seç" : "Dünkü DOCX Dosyasını Yükle";
+  }
+
   async function aoeLoadPreviousFile(file) {
     if (!file) return;
     try {
       const entries = await aoeReadZipEntries(file);
+      const documentXml = entries['word/document.xml'] || "";
       const xml = entries['word/acil-otoexport-data.xml'];
       let payload;
       if (xml) {
         const doc = new DOMParser().parseFromString(xml, "application/xml");
         payload = JSON.parse(doc.documentElement.textContent || "{}");
       } else {
-        payload = aoeLegacyManifest(entries['word/document.xml']);
+        payload = aoeLegacyManifest(documentXml);
         if (!(payload.patients || []).length) throw new Error("Eski DOCX içinden hasta sabit bilgileri okunamadı.");
       }
+      const legacy = aoeLegacyManifest(documentXml);
+      const mergedPatients = [...(payload.patients || [])];
+      (legacy.patients || []).forEach((patient) => {
+        if (!(patient.keys || []).some((key) => mergedPatients.some((old) => (old.keys || []).includes(key)))) mergedPatients.push(patient);
+      });
+      payload.patients = mergedPatients;
       const map = {};
       (payload.patients || []).forEach((patient) => (patient.keys || []).forEach((key) => { map[key] = patient; }));
       state.aoePreviousFixed = map;
+      state.aoePreviousPatients = payload.patients || [];
+      state.aoePreviousWordPatients = aoePreviousWordPatients(documentXml);
       state.aoePreviousFileName = file.name;
       state.aoePreviousPatientCount = (payload.patients || []).length;
-      alert(file.name + " yüklendi. " + state.aoePreviousPatientCount + " hastanın sabit bilgileri korunacak.");
+      state.aoePreviousMissingCount = aoeMissingPreviousWordPatients().length;
+      const loadedMessage = "YÜKLENDİ ✓ " + file.name + " • " + state.aoePreviousPatientCount +
+        " hasta • açık listede olmayan " + state.aoePreviousMissingCount + " hasta değişmeden korunacak";
+      aoeSetOldFileStatus(true, loadedMessage);
+      alert(loadedMessage);
     } catch (e) {
       state.aoePreviousFixed = {};
+      state.aoePreviousPatients = [];
+      state.aoePreviousWordPatients = [];
       state.aoePreviousFileName = "";
       state.aoePreviousPatientCount = 0;
+      state.aoePreviousMissingCount = 0;
+      aoeSetOldFileStatus(false, "YÜKLENEMEDİ — " + (e?.message || e));
       alert("Eski dosya okunamadı: " + (e?.message || e));
     }
   }
@@ -6274,6 +6367,7 @@ ${consults || "-"}
     holder.innerHTML =
       '<div id="aoe-ready" style="grid-column:1/-1;padding:6px;border-radius:5px;background:#fee2e2;color:#991b1b;font-weight:bold">Tarama bekleniyor</div>' +
       '<button id="aoe-load-old" style="grid-column:1/-1;background:#7c3aed;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Dünkü DOCX Dosyasını Yükle</button>' +
+      '<div id="aoe-old-status" style="grid-column:1/-1;padding:6px;border-radius:5px;background:#f1f5f9;color:#475569;font-size:11px">Henüz DOCX yüklenmedi</div>' +
       '<input id="aoe-old-file" type="file" accept=".docx" style="display:none">' +
       '<button id="aoe-order-clinics" style="grid-column:1/-1;background:#334155;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Klinik Sırasını Ayarla</button>' +
       '<div id="aoe-order-summary" style="grid-column:1/-1;font-size:10px;color:#475569;line-height:1.25"></div>' +
@@ -6282,7 +6376,7 @@ ${consults || "-"}
     root.prepend(holder);
     uiEl("aoe-word-all").onclick = aoeDownloadWord;
     uiEl("aoe-docs-all").onclick = aoeGoogleDocs;
-    uiEl("aoe-load-old").onclick = () => uiEl("aoe-old-file").click();
+    uiEl("aoe-load-old").onclick = () => { const input = uiEl("aoe-old-file"); input.value = ""; input.click(); };
     uiEl("aoe-order-clinics").onclick = aoeConfigureClinicOrder;
     uiEl("aoe-old-file").onchange = (event) => aoeLoadPreviousFile(event.target.files?.[0]);
   }
