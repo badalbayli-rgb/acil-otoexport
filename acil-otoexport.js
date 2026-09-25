@@ -2400,11 +2400,11 @@
 
   function visitLabTableHtml(labs = {}, vitalLine = "") {
     const dates = labVisitDates(labs, 8);
-    const tableStyle = "border-collapse:collapse;font-family:Arial Narrow,Arial,sans-serif;font-size:6.5pt;line-height:1.05;table-layout:fixed;width:270pt;";
-    const thStyle = "text-align:center;font-weight:bold;padding:1px 2px;border:1px solid #d9dee6;white-space:nowrap;";
-    const firstThStyle = "text-align:left;font-weight:bold;padding:1px 2px;border:1px solid #d9dee6;white-space:nowrap;width:34pt;";
-    const tdStyle = "text-align:center;padding:1px 2px;border:1px solid #e5e7eb;vertical-align:middle;white-space:nowrap;";
-    const firstTdStyle = "text-align:left;padding:1px 2px;border:1px solid #e5e7eb;vertical-align:middle;white-space:nowrap;font-weight:bold;width:34pt;";
+    const tableStyle = "border-collapse:collapse;font-family:Arial Narrow,Arial,sans-serif;font-size:7.8pt;line-height:1.15;table-layout:fixed;width:100%;";
+    const thStyle = "text-align:center;font-weight:bold;padding:1.2px 2.4px;border:1px solid #d9dee6;white-space:nowrap;";
+    const firstThStyle = "text-align:left;font-weight:bold;padding:1.2px 2.4px;border:1px solid #d9dee6;white-space:nowrap;width:41pt;";
+    const tdStyle = "text-align:center;padding:1.2px 2.4px;border:1px solid #e5e7eb;vertical-align:middle;white-space:nowrap;";
+    const firstTdStyle = "text-align:left;padding:1.2px 2.4px;border:1px solid #e5e7eb;vertical-align:middle;white-space:nowrap;font-weight:bold;width:41pt;";
     if (!dates.length) {
       return vitalLine
         ? `<table style="${tableStyle}"><thead><tr><th style="${firstThStyle}">Tetkik</th><th style="${thStyle}">Son</th></tr></thead><tbody><tr><td style="${firstTdStyle}"><strong>Vital</strong></td><td style="${tdStyle}">${escapeHtml(vitalLine)}</td></tr></tbody></table>`
@@ -5699,13 +5699,104 @@ ${consults || "-"}
     };
   }
 
+  function aoeAgeSex(p) {
+    const age = clean(p.yas || "");
+    const raw = norm(p.cinsiyet || "");
+    const sex = /^(e|erkek|male|m)$/.test(raw) ? "E" : (/^(k|kadın|kadin|female|f)$/.test(raw) ? "K" : "");
+    return age + sex;
+  }
+
+  function aoeClinicName(p) {
+    return clean(p.birim || p.servis || p.klinik || "DİĞER KLİNİKLER");
+  }
+
+  function aoeClinicKey(p) {
+    return norm(aoeClinicName(p)).replace(/\s+/g, " ");
+  }
+
+  function aoeClinicPriority(name) {
+    const value = norm(name);
+    if (/genel\s*cerrahi/.test(value)) {
+      const no = Number(value.match(/(?:kliniği|klinigi|servisi|servis)?\s*([1-4])\b/)?.[1] || value.match(/\b([1-4])\b/)?.[1] || 0);
+      return ({ 2:0, 1:1, 3:2, 4:3 })[no] ?? 4;
+    }
+    return 100;
+  }
+
+  function aoeDefaultClinicOrder() {
+    const names = [...new Map((state.patients || []).map((p) => [aoeClinicKey(p), aoeClinicName(p)])).values()];
+    return names.sort((a, b) => {
+      const rank = aoeClinicPriority(a) - aoeClinicPriority(b);
+      return rank || a.localeCompare(b, "tr", { sensitivity:"base", numeric:true });
+    });
+  }
+
+  function aoeSavedClinicOrder() {
+    if (Array.isArray(state.aoeClinicOrder)) return state.aoeClinicOrder;
+    try {
+      const saved = JSON.parse(localStorage.getItem("acilOtoexportClinicOrder") || "[]");
+      state.aoeClinicOrder = Array.isArray(saved) ? saved.map(clean).filter(Boolean) : [];
+    } catch (e) { state.aoeClinicOrder = []; }
+    return state.aoeClinicOrder;
+  }
+
+  function aoeEffectiveClinicOrder() {
+    const defaults = aoeDefaultClinicOrder();
+    const byKey = new Map(defaults.map((name) => [norm(name), name]));
+    const ordered = [];
+    aoeSavedClinicOrder().forEach((name) => {
+      const actual = byKey.get(norm(name));
+      if (actual && !ordered.some((x) => norm(x) === norm(actual))) ordered.push(actual);
+    });
+    defaults.forEach((name) => {
+      if (!ordered.some((x) => norm(x) === norm(name))) ordered.push(name);
+    });
+    return ordered;
+  }
+
+  function aoeConfigureClinicOrder() {
+    const current = aoeEffectiveClinicOrder();
+    if (!current.length) return alert("Önce hasta listesini tarayın.");
+    const answer = prompt(
+      "Klinikleri istediğiniz sırada, her satıra bir klinik gelecek şekilde düzenleyin:",
+      current.join("\n")
+    );
+    if (answer == null) return;
+    const requested = answer.split(/\n|,/).map(clean).filter(Boolean);
+    const available = new Map(current.map((name) => [norm(name), name]));
+    const valid = requested.map((name) => available.get(norm(name))).filter(Boolean);
+    current.forEach((name) => { if (!valid.some((x) => norm(x) === norm(name))) valid.push(name); });
+    state.aoeClinicOrder = [...new Map(valid.map((name) => [norm(name), name])).values()];
+    try { localStorage.setItem("acilOtoexportClinicOrder", JSON.stringify(state.aoeClinicOrder)); } catch (e) {}
+    const summary = uiEl("aoe-order-summary");
+    if (summary) summary.textContent = "Çıktı sırası: " + state.aoeClinicOrder.join(" → ");
+  }
+
+  function aoeSortedPatients() {
+    const order = new Map(aoeEffectiveClinicOrder().map((name, index) => [norm(name), index]));
+    return (state.patients || []).slice().sort((a, b) => {
+      const clinicA = aoeClinicName(a), clinicB = aoeClinicName(b);
+      const rank = (order.get(norm(clinicA)) ?? 999) - (order.get(norm(clinicB)) ?? 999);
+      if (rank) return rank;
+      const clinicOrder = clinicA.localeCompare(clinicB, "tr", { sensitivity:"base", numeric:true });
+      if (clinicOrder) return clinicOrder;
+      const roomOrder = clean(a.oda || "").localeCompare(clean(b.oda || ""), "tr", { sensitivity:"base", numeric:true });
+      if (roomOrder) return roomOrder;
+      return clean(a.adSoyad || "").localeCompare(clean(b.adSoyad || ""), "tr", { sensitivity:"base" });
+    });
+  }
+
+  function aoeClinicHeadingHtml(name) {
+    return '<div class="clinic-heading">' + aoeEsc(clean(name).toLocaleUpperCase("tr-TR")) + '</div>';
+  }
+
   function aoePatientHtml(p) {
     const meta = extractCardMeta(p);
     const consultFacts = aoeConsultFacts(p);
     const surgery = aoeSurgeryInfo(p);
     const diet = compactDietInfo(p.diyet || "");
     const fixed = aoeFixedFor(p);
-    const title = [doctorInitials(p.doktor), p.oda, fixed.name || p.adSoyad, p.yas].filter(Boolean).join("-");
+    const title = [doctorInitials(p.doktor), p.oda, fixed.name || p.adSoyad, aoeAgeSex(p)].filter(Boolean).join("-");
     const orders = aoeOrderLines(p.orders || []);
     const clinicalRow = aoeLatestClinical(p);
     const clinical = clinicalRow ? [clinicalRow].map((x) =>
@@ -5714,16 +5805,16 @@ ${consults || "-"}
     ).join("") : "—";
     const nursingRows = aoeLatestNursingRows(p);
     const nursing = nursingRows.map((x) =>
-      "<div><b>(" + aoeEsc(aoeDate(x.date) || "—") + ")</b> " + aoeEsc(x.text) + "</div>"
+      "<div class=\"nursing-item\"><b>(" + aoeEsc(aoeDate(x.date) || "—") + ")</b> " + aoeEsc(x.text) + "</div>"
     ).join("") || "—";
     const imaging = (p.radiology || []).filter((x) => aoeImagingName(x)).map((x) =>
-      "<div><b>" + aoeEsc(aoeDate(x.date || x.reportDate) || "—") + ": " +
+      "<div>" + aoeEsc(aoeDate(x.date || x.reportDate) || "—") + ": <b>" +
       aoeEsc(aoeImagingName(x)) + "</b>" +
       ((x.reportText || x.report) ? "<br>" + aoeEsc(x.reportText || x.report) : "") + "</div>"
     ).join("") || "—";
-    const consults = (p.consults || []).map((x) =>
-      x.answer ? "<div><b>(" + aoeEsc(aoeDate(x.date) || "—") + ") " + aoeEsc(x.unit || "Konsültasyon") +
-      "</b><br>" + aoeEsc(x.answer) + "</div>" : ""
+    const consults = (p.consults || []).filter((x) => clean(x.answer)).map((x) =>
+      "<div class=\"consult-item\">(" + aoeEsc(aoeDate(x.date) || "—") + ") <b>" + aoeEsc(x.unit || "Konsültasyon") +
+      "</b><br>" + aoeEsc(x.answer) + "</div>"
     ).join("") || "—";
     const labTable = typeof visitLabTableHtml === "function"
       ? visitLabTableHtml(p.labs || {}, latestVitalLine(p.vitals || [], p)) : "";
@@ -5749,19 +5840,31 @@ ${consults || "-"}
   }
 
   function aoeSplitColumns(patients) {
-    const left = [], right = [];
-    let leftWeight = 0, rightWeight = 0;
-    patients.forEach((p) => {
+    const sorted = patients.slice();
+    const prepared = sorted.map((p) => {
       const html = aoePatientHtml(p);
-      const weight = html.replace(/<[^>]+>/g, "").length;
-      if (leftWeight <= rightWeight) { left.push(html); leftWeight += weight; }
-      else { right.push(html); rightWeight += weight; }
+      return { p, html, weight:html.replace(/<[^>]+>/g, "").length };
+    });
+    const target = prepared.reduce((sum, x) => sum + x.weight, 0) / 2;
+    const left = [], right = []; let side = 0, leftWeight = 0, lastClinic = "";
+    prepared.forEach((item, index) => {
+      const clinic = aoeClinicKey(item.p);
+      const changedClinic = clinic !== lastClinic;
+      if (side === 0 && left.length && leftWeight >= target) {
+        side = 1;
+        lastClinic = "";
+      }
+      const bucket = side === 0 ? left : right;
+      if (clinic !== lastClinic) bucket.push(aoeClinicHeadingHtml(aoeClinicName(item.p)));
+      bucket.push(item.html);
+      if (side === 0) leftWeight += item.weight + (changedClinic ? 80 : 0);
+      lastClinic = clinic;
     });
     return [left.join(""), right.join("")];
   }
 
   function aoeDocumentHtml() {
-    const columns = aoeSplitColumns(state.patients || []);
+    const columns = aoeSplitColumns(aoeSortedPatients());
     return '<!doctype html><html><head><meta charset="utf-8"><title>Acil OtoExport</title><style>' +
       '@page{size:A4;margin:18mm 14mm 17mm 14mm}' +
       'body{margin:0;color:#000;font-family:Tahoma,Arial,sans-serif;font-size:9pt;line-height:1.03}' +
@@ -5773,6 +5876,8 @@ ${consults || "-"}
       '.patient,.patient *{font-family:Tahoma,Arial,sans-serif;font-size:9pt}' +
       '.patient{margin:0;padding:0;line-height:1.03}' +
       '.patient-title{font-size:15pt;line-height:1.0;font-weight:bold;margin:0 0 1pt}' +
+      '.clinic-heading{text-align:center;font-size:12pt;font-weight:bold;margin:0 0 8pt;border-bottom:1px solid #555;padding-bottom:2pt}' +
+      '.consult-item+.consult-item,.nursing-item+.nursing-item{margin-top:9pt!important}' +
       '.patient div{margin:0;padding:0}.rule{border-top:1px dashed #333;margin:3pt 0!important}' +
       '.labs{font-size:9pt}.imaging,.imaging *{font-size:10pt}.patient b{font-weight:bold}' +
       '.section-gap{font-size:9pt;line-height:9pt;height:9pt}' +
@@ -5803,6 +5908,7 @@ ${consults || "-"}
     const before = Number(options.before || 0);
     const after = Number(options.after || 0);
     const keep = options.keep ? "<w:keepNext/>" : "";
+    const align = options.align ? '<w:jc w:val="' + options.align + '"/>' : "";
     const lines = String(text == null ? "" : text).split(/\n/);
     const runs = lines.map((line, index) =>
       (index ? "<w:r><w:br/></w:r>" : "") +
@@ -5810,22 +5916,41 @@ ${consults || "-"}
       bold + '<w:sz w:val="' + size + '"/><w:szCs w:val="' + size + '"/></w:rPr>' +
       '<w:t xml:space="preserve">' + aoeXml(line) + '</w:t></w:r>'
     ).join("");
-    return '<w:p><w:pPr>' + keep + '<w:spacing w:before="' + before + '" w:after="' + after +
+    return '<w:p><w:pPr>' + keep + align + '<w:spacing w:before="' + before + '" w:after="' + after +
+      '" w:line="180" w:lineRule="auto"/></w:pPr>' + runs + '</w:p>';
+  }
+
+  function aoeWordRichParagraph(parts = [], options = {}) {
+    const size = Math.round(Number(options.size || 9) * 2);
+    const keep = options.keep ? "<w:keepNext/>" : "";
+    const align = options.align ? '<w:jc w:val="' + options.align + '"/>' : "";
+    const before = Number(options.before || 0), after = Number(options.after || 0);
+    const runs = parts.map((part) => {
+      const bold = part.bold ? "<w:b/>" : "";
+      const segments = String(part.text == null ? "" : part.text).split(/\n/);
+      return segments.map((line, index) =>
+        (part.breakBefore || index ? '<w:r><w:br/></w:r>' : "") +
+        '<w:r><w:rPr><w:rFonts w:ascii="Tahoma" w:hAnsi="Tahoma" w:cs="Tahoma"/>' + bold +
+        '<w:sz w:val="' + size + '"/><w:szCs w:val="' + size + '"/></w:rPr>' +
+        '<w:t xml:space="preserve">' + aoeXml(line) + '</w:t></w:r>'
+      ).join("");
+    }).join("");
+    return '<w:p><w:pPr>' + keep + align + '<w:spacing w:before="' + before + '" w:after="' + after +
       '" w:line="180" w:lineRule="auto"/></w:pPr>' + runs + '</w:p>';
   }
 
   function aoeWordTableCell(text, options = {}) {
     const width = Number(options.width || 420);
     const span = Math.max(1, Number(options.span || 1));
-    const size = Math.round(Number(options.size || 6.5) * 2);
+    const size = Math.round(Number(options.size || 7.8) * 2);
     const bold = options.bold ? "<w:b/>" : "";
     const align = options.align || "center";
     const shade = options.shade ? '<w:shd w:val="clear" w:color="auto" w:fill="' + options.shade + '"/>' : "";
     return '<w:tc><w:tcPr><w:tcW w:w="' + width + '" w:type="dxa"/>' +
       (span > 1 ? '<w:gridSpan w:val="' + span + '"/>' : "") + shade +
-      '<w:tcMar><w:top w:w="12" w:type="dxa"/><w:left w:w="24" w:type="dxa"/>' +
-      '<w:bottom w:w="12" w:type="dxa"/><w:right w:w="24" w:type="dxa"/></w:tcMar></w:tcPr>' +
-      '<w:p><w:pPr><w:jc w:val="' + align + '"/><w:spacing w:before="0" w:after="0" w:line="150" w:lineRule="auto"/></w:pPr>' +
+      '<w:tcMar><w:top w:w="14" w:type="dxa"/><w:left w:w="29" w:type="dxa"/>' +
+      '<w:bottom w:w="14" w:type="dxa"/><w:right w:w="29" w:type="dxa"/></w:tcMar></w:tcPr>' +
+      '<w:p><w:pPr><w:jc w:val="' + align + '"/><w:spacing w:before="0" w:after="0" w:line="180" w:lineRule="auto"/></w:pPr>' +
       '<w:r><w:rPr><w:rFonts w:ascii="Arial Narrow" w:hAnsi="Arial Narrow" w:cs="Arial Narrow"/>' +
       bold + '<w:sz w:val="' + size + '"/><w:szCs w:val="' + size + '"/></w:rPr>' +
       '<w:t xml:space="preserve">' + aoeXml(text || "") + '</w:t></w:r></w:p></w:tc>';
@@ -5840,14 +5965,14 @@ ${consults || "-"}
     if (!dates.length) {
       if (!vitalLine) return aoeWordParagraph("—", { size:9 });
       return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>' + border + '</w:tblPr>' +
-        '<w:tblGrid><w:gridCol w:w="650"/><w:gridCol w:w="3100"/></w:tblGrid>' +
-        '<w:tr>' + aoeWordTableCell("Tetkik", { width:650, bold:true, shade:"EEF2F7", align:"left" }) +
-        aoeWordTableCell("Son", { width:3100, bold:true, shade:"EEF2F7" }) + '</w:tr>' +
-        '<w:tr>' + aoeWordTableCell("Vital", { width:650, bold:true, align:"left" }) +
-        aoeWordTableCell(vitalLine, { width:3100, align:"left" }) + '</w:tr></w:tbl>';
+        '<w:tblGrid><w:gridCol w:w="780"/><w:gridCol w:w="3720"/></w:tblGrid>' +
+        '<w:tr>' + aoeWordTableCell("Tetkik", { width:780, bold:true, shade:"EEF2F7", align:"left" }) +
+        aoeWordTableCell("Son", { width:3720, bold:true, shade:"EEF2F7" }) + '</w:tr>' +
+        '<w:tr>' + aoeWordTableCell("Vital", { width:780, bold:true, align:"left" }) +
+        aoeWordTableCell(vitalLine, { width:3720, align:"left" }) + '</w:tr></w:tbl>';
     }
-    const firstWidth = 610;
-    const dataWidth = Math.max(350, Math.floor(3140 / dates.length));
+    const firstWidth = 732;
+    const dataWidth = Math.max(420, Math.floor(3768 / dates.length));
     const grid = '<w:tblGrid><w:gridCol w:w="' + firstWidth + '"/>' +
       dates.map(() => '<w:gridCol w:w="' + dataWidth + '"/>').join("") + '</w:tblGrid>';
     const header = '<w:tr>' + aoeWordTableCell("Tetkik", { width:firstWidth, bold:true, shade:"EEF2F7", align:"left" }) +
@@ -5874,7 +5999,7 @@ ${consults || "-"}
     const surgery = aoeSurgeryInfo(p);
     const diet = compactDietInfo(p.diyet || "");
     const fixed = aoeFixedFor(p);
-    const title = [doctorInitials(p.doktor), p.oda, fixed.name || p.adSoyad, p.yas].filter(Boolean).join("-");
+    const title = [doctorInitials(p.doktor), p.oda, fixed.name || p.adSoyad, aoeAgeSex(p)].filter(Boolean).join("-");
     const paragraphs = [
       aoeWordParagraph(title, { size:15, bold:true, keep:true }),
       aoeWordParagraph("", { size:9 }),
@@ -5900,9 +6025,10 @@ ${consults || "-"}
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     const nursingRows = aoeLatestNursingRows(p);
     paragraphs.push(aoeWordParagraph("Gözlem:", { size:9, bold:true, keep:true }));
-    if (nursingRows.length) nursingRows.forEach((x) => paragraphs.push(
-      aoeWordParagraph("(" + (aoeDate(x.date) || "—") + ") " + x.text, { size:9 })
-    ));
+    if (nursingRows.length) nursingRows.forEach((x, index) => {
+      paragraphs.push(aoeWordParagraph("(" + (aoeDate(x.date) || "—") + ") " + x.text, { size:9 }));
+      if (index < nursingRows.length - 1) paragraphs.push(aoeWordParagraph("", { size:9 }));
+    });
     else paragraphs.push(aoeWordParagraph("—", { size:9 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Takip:", { size:9, bold:true, keep:true }));
@@ -5914,17 +6040,23 @@ ${consults || "-"}
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Konsültasyonlar:", { size:9, bold:true, keep:true }));
     const answeredConsults = (p.consults || []).filter((x) => clean(x.answer));
-    answeredConsults.forEach((x) => paragraphs.push(aoeWordParagraph(
-      "(" + (aoeDate(x.date) || "—") + ") " + (x.unit || "Konsültasyon") + "\n" + x.answer, { size:9 }
-    )));
+    answeredConsults.forEach((x, index) => {
+      paragraphs.push(aoeWordRichParagraph([
+        { text:"(" + (aoeDate(x.date) || "—") + ") " },
+        { text:x.unit || "Konsültasyon", bold:true },
+        { text:x.answer, breakBefore:true }
+      ], { size:9 }));
+      if (index < answeredConsults.length - 1) paragraphs.push(aoeWordParagraph("", { size:9 }));
+    });
     if (!answeredConsults.length) paragraphs.push(aoeWordParagraph("—", { size:9 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Görüntüleme:", { size:10, bold:true, keep:true }));
     const namedImaging = (p.radiology || []).filter((x) => aoeImagingName(x));
-    namedImaging.forEach((x) => paragraphs.push(aoeWordParagraph(
-      (aoeDate(x.date || x.reportDate) || "—") + ": " + aoeImagingName(x) +
-      ((x.reportText || x.report) ? "\n" + (x.reportText || x.report) : ""), { size:10 }
-    )));
+    namedImaging.forEach((x) => paragraphs.push(aoeWordRichParagraph([
+      { text:(aoeDate(x.date || x.reportDate) || "—") + ": " },
+      { text:aoeImagingName(x), bold:true },
+      ...((x.reportText || x.report) ? [{ text:x.reportText || x.report, breakBefore:true }] : [])
+    ], { size:10 })));
     if (!namedImaging.length) paragraphs.push(aoeWordParagraph("—", { size:10 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }));
     return paragraphs.join("");
@@ -5962,8 +6094,16 @@ ${consults || "-"}
   }
 
   function aoeDocxBytes() {
-    const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) +
-      (state.patients || []).map(aoeWordPatient).join("");
+    let lastClinic = "";
+    const groupedPatients = aoeSortedPatients().map((p) => {
+      const key = aoeClinicKey(p);
+      const heading = key !== lastClinic
+        ? aoeWordParagraph(aoeClinicName(p).toLocaleUpperCase("tr-TR"), { size:12, bold:true, align:"center", before:80, after:120, keep:true })
+        : "";
+      lastClinic = key;
+      return heading + aoeWordPatient(p);
+    }).join("");
+    const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) + groupedPatients;
     const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + body +
       '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1843" w:right="1121" w:bottom="1535" w:left="1005" w:header="720" w:footer="0"/><w:cols w:num="2" w:space="720" w:sep="1"/></w:sectPr></w:body></w:document>';
@@ -6120,12 +6260,15 @@ ${consults || "-"}
       '<div id="aoe-ready" style="grid-column:1/-1;padding:6px;border-radius:5px;background:#fee2e2;color:#991b1b;font-weight:bold">Tarama bekleniyor</div>' +
       '<button id="aoe-load-old" style="grid-column:1/-1;background:#7c3aed;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Dünkü DOCX Dosyasını Yükle</button>' +
       '<input id="aoe-old-file" type="file" accept=".docx" style="display:none">' +
+      '<button id="aoe-order-clinics" style="grid-column:1/-1;background:#334155;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Klinik Sırasını Ayarla</button>' +
+      '<div id="aoe-order-summary" style="grid-column:1/-1;font-size:10px;color:#475569;line-height:1.25"></div>' +
       '<button id="aoe-word-all" style="background:#166534;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Tümünü Word İndir</button>' +
       '<button id="aoe-docs-all" style="background:#1d4ed8;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Tümünü Google Docs</button>';
     root.prepend(holder);
     uiEl("aoe-word-all").onclick = aoeDownloadWord;
     uiEl("aoe-docs-all").onclick = aoeGoogleDocs;
     uiEl("aoe-load-old").onclick = () => uiEl("aoe-old-file").click();
+    uiEl("aoe-order-clinics").onclick = aoeConfigureClinicOrder;
     uiEl("aoe-old-file").onchange = (event) => aoeLoadPreviousFile(event.target.files?.[0]);
   }
 
@@ -6137,7 +6280,9 @@ ${consults || "-"}
     const badge = uiEl("aoe-ready");
     const word = uiEl("aoe-word-all");
     const docs = uiEl("aoe-docs-all");
+    const orderSummary = uiEl("aoe-order-summary");
     if (!badge) return;
+    if (orderSummary) orderSummary.textContent = "Çıktı sırası: " + (aoeEffectiveClinicOrder().join(" → ") || "Hasta listesi bekleniyor");
     const info = aoeReadiness();
     if (info.ready) {
       badge.textContent = "Hazır: " + info.total + "/" + info.total + " hasta tamamen tarandı" +
