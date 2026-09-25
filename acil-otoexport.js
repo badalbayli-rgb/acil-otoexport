@@ -2729,6 +2729,67 @@
     return `${item.key}: kurum protokolünü değerlendir`;
   }
 
+  const HIZLI_ORDER_CONFIG_URL = "https://dr-hizli-order-default-rtdb.europe-west1.firebasedatabase.app/config.json";
+
+  async function openHizliOrderForElectrolyte(p, item) {
+    if (!p || !item || item.advice?.status !== "low") {
+      alert("Hızlı replasman yalnızca düşük elektrolit sonucunda açılır. Order öncesinde sonucu ve hastayı doğrulayın.");
+      return;
+    }
+    const context = {
+      source:"acil-otoexport",
+      createdAt:new Date().toISOString(),
+      patient:{
+        key:displayKey(p), hastaId:clean(p.hastaId), hastaGelisId:clean(p.hastaGelisId),
+        birimSevkId:clean(p.birimSevkId), protokol:clean(p.protokol),
+        adSoyad:clean(p.adSoyad), oda:clean(p.oda), birim:clean(p.birim)
+      },
+      electrolyte:{ key:item.key, label:item.adviceLabel || item.label, value:clean(item.value), date:clean(item.date) }
+    };
+    const accepted = confirm(
+      context.patient.adSoyad + " — " + context.electrolyte.label + " " + context.electrolyte.value +
+      "\n\nHızlı Order açılsın mı? Hasta, ürün, doz, yol ve hızı kontrol edip son onayı siz vereceksiniz. Otomatik order gönderilmeyecek."
+    );
+    if (!accepted) return;
+    window.__ACIL_HIZLI_ORDER_CONTEXT__ = context;
+    try { sessionStorage.setItem("acilHizliOrderContext", JSON.stringify(context)); } catch (e) {}
+    const note = document.createElement("div");
+    note.style.cssText = "position:fixed;top:20px;right:20px;background:#0056b3;color:#fff;padding:15px;z-index:999999;border-radius:8px;font-family:sans-serif;box-shadow:0 4px 15px rgba(0,0,0,.3);font-weight:bold;font-size:14px;max-width:380px";
+    note.innerText = "Hızlı Order yükleniyor: " + context.patient.adSoyad + " / " + context.electrolyte.label + " " + context.electrolyte.value;
+    document.body.appendChild(note);
+    try {
+      let username = "Bilinmiyor", fullname = "Bilinmiyor", config = {};
+      const fetchLogin = async () => {
+        const res = await fetch("/hbys-rs/hbys/HBYSSistem/KullaniciGiris/checkLogin?_dc=" + Date.now());
+        if (!res.ok) return;
+        const k = (await res.json())?.data?.kullanici;
+        if (k) {
+          username = k.kullaniciAdi || "Bilinmiyor";
+          fullname = k.kimlik ? ((k.kimlik.adi || "") + " " + (k.kimlik.soyadi || "")).trim() : "Bilinmiyor";
+        }
+      };
+      const fetchConfig = async () => {
+        const res = await fetch(HIZLI_ORDER_CONFIG_URL + "?_dc=" + Date.now(), { cache:"no-store" });
+        if (res.ok) config = await res.json() || {};
+      };
+      await Promise.allSettled([fetchLogin(), fetchConfig()]);
+      if (!username || username === "Bilinmiyor") throw new Error("HBYS oturumu doğrulanamadı");
+      if (config.system_active === false) throw new Error("Sistem bakımda: " + (config.maintenance_message || "Daha sonra tekrar deneyin"));
+      if (!config.core_script) throw new Error("Hızlı Order çekirdek kodu alınamadı");
+      window._hizliOrderLoaderLogged = true;
+      window._yeniLoaderV4 = true;
+      let scriptContent = config.core_script;
+      if (typeof scriptContent === "string" && scriptContent.startsWith('"') && scriptContent.endsWith('"')) scriptContent = scriptContent.slice(1, -1);
+      note.remove();
+      new Function(scriptContent)();
+      window.dispatchEvent(new CustomEvent("acil-otoexport:hizli-order-context", { detail:context }));
+    } catch (error) {
+      note.style.background = "#b91c1c";
+      note.innerText = "Hızlı Order açılamadı: " + (error?.message || error);
+      window.setTimeout(() => note.remove(), 7000);
+    }
+  }
+
   function replacementViewHtml(patients = []) {
     const t = activeTheme();
     const fonetIndex = new Map((state.fonetOrder || []).map((key, index) => [key, index]));
@@ -2751,7 +2812,12 @@
       const labCells = electrolytes.map((x) => {
         const palette = x.advice.status === "low" ? ["#fff7ed", "#c2410c"] : x.advice.status === "high" ? ["#fef2f2", "#b91c1c"] : x.advice.status === "normal" ? ["#ecfdf5", "#047857"] : ["#f8fafc", "#64748b"];
         const arrow = x.advice.status === "low" ? "↓" : x.advice.status === "high" ? "↑" : x.advice.status === "normal" ? "" : "–";
-        return `<div title="${escapeHtml(`${x.label}: ${x.displayValue || "sonuç yok"} · ${x.advice.title}`)}" style="height:50px;border:1px solid ${palette[1]}55;border-radius:7px;background:${palette[0]};padding:4px 5px;text-align:center;box-sizing:border-box;overflow:hidden;"><div style="color:${palette[1]};font-size:11px;font-weight:950;line-height:1;">${x.label}${arrow}</div><strong style="display:block;font-size:${x.key === "CaCorr" ? "13" : "16"}px;line-height:1.18;color:${t.text};">${escapeHtml(x.displayValue || "—")}</strong><small style="display:block;color:#475569;font-size:9px;font-weight:700;line-height:1.1;margin-top:1px;">${escapeHtml(shortDate(x.date) || "yok")}</small></div>`;
+        const tag = x.advice.status === "low" ? "button" : "div";
+        const action = x.advice.status === "low"
+          ? ` data-quick-order-patient="${escapeHtml(key)}" data-quick-order-electrolyte="${escapeHtml(x.key)}" type="button"`
+          : "";
+        const cursor = x.advice.status === "low" ? "cursor:pointer;" : "";
+        return `<${tag}${action} title="${escapeHtml(`${x.label}: ${x.displayValue || "sonuç yok"} · ${x.advice.title}${x.advice.status === "low" ? " · Hızlı Order aç" : ""}`)}" style="height:50px;border:1px solid ${palette[1]}55;border-radius:7px;background:${palette[0]};padding:4px 5px;text-align:center;box-sizing:border-box;overflow:hidden;width:100%;font-family:inherit;${cursor}"><div style="color:${palette[1]};font-size:11px;font-weight:950;line-height:1;">${x.label}${arrow}</div><strong style="display:block;font-size:${x.key === "CaCorr" ? "13" : "16"}px;line-height:1.18;color:${t.text};">${escapeHtml(x.displayValue || "—")}</strong><small style="display:block;color:#475569;font-size:9px;font-weight:700;line-height:1.1;margin-top:1px;">${escapeHtml(shortDate(x.date) || "yok")}</small></${tag}>`;
       }).join("");
       const adviceRows = abnormal.map((x) => `<div style="border-left:4px solid ${x.advice.status === "high" ? "#dc2626" : "#f59e0b"};padding:8px 10px;background:${x.advice.status === "high" ? "#fef2f2" : "#fffbeb"};border-radius:6px;"><div style="display:flex;gap:8px;align-items:center;"><b style="font-size:13px;">${x.adviceLabel} ${escapeHtml(x.value)}</b><span style="font-size:12px;font-weight:900;color:${x.advice.status === "high" ? "#b91c1c" : "#9a3412"};">${escapeHtml(x.advice.title)}</span><a href="${REPLACEMENT_SOURCES[x.key]}" target="_blank" rel="noreferrer" style="margin-left:auto;color:${t.primary2};font-size:11px;font-weight:850;">kaynak ↗</a></div><div style="font-size:12.5px;line-height:1.4;color:${t.text};margin-top:4px;">${escapeHtml(x.advice.text)}</div></div>`).join("");
       const compactNotes = abnormal.map(compactReplacementText).filter(Boolean);
@@ -5183,6 +5249,16 @@ ${consults || "-"}
       btn.onclick = (event) => {
         event.stopPropagation();
         openPatientDetailV16(btn.dataset.openPatient);
+      };
+    });
+
+    Array.from(grid.querySelectorAll("button[data-quick-order-patient]")).forEach((button) => {
+      button.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const p = state.patients.find((item) => displayKey(item) === button.dataset.quickOrderPatient);
+        const electrolyte = patientElectrolytes(p).find((item) => item.key === button.dataset.quickOrderElectrolyte);
+        openHizliOrderForElectrolyte(p, electrolyte);
       };
     });
 
