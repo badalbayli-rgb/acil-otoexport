@@ -5562,8 +5562,51 @@ ${consults || "-"}
     }).filter(Boolean);
   }
 
+  function aoeConsultFacts(p) {
+    const answers = (p.consults || []).map((x) => cleanMultiline(x.answer || "")).filter(Boolean);
+    const text = answers.join("\n");
+    const field = (label) => {
+      const pattern = new RegExp("(?:^|\\n|[.;])\\s*" + label + "\\s*[:\\-]\\s*([^\\n;]+?)(?=\\s+(?:BH|Kİ|KI|GO|ASA)\\s*[:\\-]|$)", "i");
+      return clean(text.match(pattern)?.[1] || "");
+    };
+    let diagnosis = "";
+    for (const answer of answers) {
+      const sentences = answer.split(/(?<=[.!?])\s+|\n+/).map(clean).filter(Boolean);
+      for (const sentence of sentences) {
+        const match = sentence.match(/(?:hastanın\s+)?(.{3,100}?)\s+(tanısı|tanisi|nedeni)\s+ile\s+(?:yatışı|yatisi|yatış|yatis)\s+(?:uygundur|uygun)/i);
+        if (match) {
+          diagnosis = clean((match[1] + " " + match[2]).replace(/^(hasta|hastanın|mevcut)\s+/i, ""));
+          break;
+        }
+      }
+      if (diagnosis) break;
+    }
+    return {
+      diagnosis,
+      bh: field("BH"),
+      ki: field("K(?:İ|I)"),
+      go: field("GO")
+    };
+  }
+
+  function aoeSurgeryInfo(p) {
+    const surgeries = (p.surgeries || []).filter((x) => surgeryDateMs(x));
+    if (!surgeries.length) return { date:"", badge:operationBadge(p) || "" };
+    const now = Date.now();
+    const past = surgeries.filter((x) => surgeryDateMs(x) <= now).sort((a,b) => surgeryDateMs(b) - surgeryDateMs(a));
+    const future = surgeries.filter((x) => surgeryDateMs(x) > now).sort((a,b) => surgeryDateMs(a) - surgeryDateMs(b));
+    const selected = past[0] || future[0];
+    return {
+      date: aoeDate(selected.startDate || selected.baslangicTarihi || selected.endDate || selected.bitisTarihi || selected.requestDate || selected.istekTarihi),
+      badge: operationBadge(p) || ""
+    };
+  }
+
   function aoePatientHtml(p) {
     const meta = extractCardMeta(p);
+    const consultFacts = aoeConsultFacts(p);
+    const surgery = aoeSurgeryInfo(p);
+    const diet = compactDietInfo(p.diyet || "");
     const title = [doctorInitials(p.doktor), p.oda, p.adSoyad, p.yas].filter(Boolean).join("-");
     const orders = aoeOrderLines(p.orders || []);
     const clinicalRows = Array.isArray(p.clinicalHistory) && p.clinicalHistory.length
@@ -5574,34 +5617,36 @@ ${consults || "-"}
       aoeEsc(x.text || x.klinikIzlem || x.aciklama || "") + "</div>"
     ).join("") || "—";
     const nurse = (p.nursing || [])[0];
-    const imaging = (p.radiology || []).map((x) =>
+    const imaging = (p.radiology || []).filter((x) => clean(x.exam || x.name || x.service || x.tetkik)).map((x) =>
       "<div><b>" + aoeEsc(aoeDate(x.date || x.reportDate) || "—") + ": " +
-      aoeEsc(x.name || x.service || x.tetkik || "Görüntüleme") + "</b>" +
+      aoeEsc(x.exam || x.name || x.service || x.tetkik) + "</b>" +
       ((x.reportText || x.report) ? "<br>" + aoeEsc(x.reportText || x.report) : "") + "</div>"
     ).join("") || "—";
     const consults = (p.consults || []).map((x) =>
-      "<div><b>(" + aoeEsc(aoeDate(x.date) || "—") + ") " + aoeEsc(x.unit || "Konsültasyon") + "</b>" +
-      (x.request ? "<br>İstem: " + aoeEsc(x.request) : "") +
-      (x.answer ? "<br>Cevap: " + aoeEsc(x.answer) : "") + "</div>"
+      x.answer ? "<div><b>(" + aoeEsc(aoeDate(x.date) || "—") + ") " + aoeEsc(x.unit || "Konsültasyon") +
+      "</b><br>" + aoeEsc(x.answer) + "</div>" : ""
     ).join("") || "—";
     const labs = typeof compactLabVitalsText === "function"
       ? compactLabVitalsText(p.labs || {}, latestVitalLine(p.vitals || [], p)) : "";
     return '<section class="patient">' +
-      '<div class="patient-title">' + aoeEsc(title) + '</div>' +
-      '<div><b>TANI:</b> ' + aoeEsc(p.tani || "—") + '</div>' +
-      '<div><b>OP:</b> ' + aoeEsc(meta.go || p.plannedOperation || "—") + '</div>' +
+      '<div class="patient-title">' + aoeEsc(title) + '</div><div class="section-gap">&nbsp;</div>' +
+      '<div><b>TANI:</b> ' + aoeEsc(consultFacts.diagnosis || p.tani || "—") + '</div>' +
+      '<div><b>OP:</b> ' + aoeEsc(meta.go || p.plannedOperation || consultFacts.go || "—") + '</div>' +
       '<div><b>PLAN:</b> ' + aoeEsc(p.plan || "—") + '</div>' +
       '<div><b>Yatış Tarihi:</b> ' + aoeEsc(aoeDate(p.yatis) || "—") + '</div>' +
-      '<div><b>BH:</b> ' + aoeEsc(meta.bh || p.knownDiseases || "—") + '</div>' +
-      '<div><b>Kİ:</b> ' + aoeEsc(meta.ki || p.homeMeds || "—") + '</div>' +
-      '<div><b>GO:</b> ' + aoeEsc(meta.go || p.plannedOperation || "—") + '</div>' +
+      '<div><b>Op Tarihi:</b> ' + aoeEsc(surgery.date || "—") + '</div>' +
+      '<div><b>PO-R:</b> ' + aoeEsc(surgery.badge || "—") + '</div>' +
+      '<div><b>Rejim:</b> ' + aoeEsc([diet.code, diet.extra].filter((x) => x && x !== "-").join(" / ") || "—") + '</div>' +
+      '<div><b>BH:</b> ' + aoeEsc(meta.bh || p.knownDiseases || consultFacts.bh || "—") + '</div>' +
+      '<div><b>Kİ:</b> ' + aoeEsc(meta.ki || p.homeMeds || consultFacts.ki || "—") + '</div>' +
+      '<div><b>GO:</b> ' + aoeEsc(meta.go || p.plannedOperation || consultFacts.go || "—") + '</div>' +
       '<div class="rule"></div>' +
-      (labs ? '<div class="labs">' + aoeEsc(labs).replace(/\n/g,"<br>") + '</div><div class="rule"></div>' : "") +
-      '<div><b>Order:</b> ' + orders + '</div>' +
-      '<div><b>Gözlem:</b> ' + (nurse ? "<b>(" + aoeEsc(aoeDate(nurse.date)) + ")</b> " + aoeEsc(nurse.text) : "—") + '</div>' +
-      '<div><b>Takip:</b>' + clinical + '</div>' +
-      '<div><b>Konsültasyonlar:</b>' + consults + '</div>' +
-      '<div class="imaging"><b>Görüntüleme:</b>' + imaging + '</div>' +
+      (labs ? '<div><b>Laboratuvar:</b></div><div class="labs">' + aoeEsc(labs).replace(/\n/g,"<br>") + '</div><div class="section-gap">&nbsp;</div>' : "") +
+      '<div><b>Order:</b></div>' + orders + '<div class="section-gap">&nbsp;</div>' +
+      '<div><b>Gözlem:</b> ' + (nurse ? "<b>(" + aoeEsc(aoeDate(nurse.date)) + ")</b> " + aoeEsc(nurse.text) : "—") + '</div><div class="section-gap">&nbsp;</div>' +
+      '<div><b>Takip:</b>' + clinical + '</div><div class="section-gap">&nbsp;</div>' +
+      '<div><b>Konsültasyonlar:</b>' + consults + '</div><div class="section-gap">&nbsp;</div>' +
+      '<div class="imaging"><b>Görüntüleme:</b>' + imaging + '</div><div class="section-gap">&nbsp;</div>' +
       '</section><div class="patient-gap">&nbsp;<br>&nbsp;</div>';
   }
 
@@ -5632,6 +5677,7 @@ ${consults || "-"}
       '.patient-title{font-size:15pt;line-height:1.0;font-weight:bold;margin:0 0 1pt}' +
       '.patient div{margin:0;padding:0}.rule{border-top:1px dashed #333;margin:3pt 0!important}' +
       '.labs{font-size:9pt}.imaging,.imaging *{font-size:10pt}.patient b{font-weight:bold}' +
+      '.section-gap{font-size:9pt;line-height:9pt;height:9pt}' +
       '.patient-gap{font-family:Tahoma,Arial,sans-serif;font-size:9pt;line-height:9pt;height:18pt}' +
       '</style></head><body><div class="title">ACİL OTOEXPORT</div>' +
       '<table class="columns"><tbody><tr><td>' + columns[0] + '</td><td>' + columns[1] +
@@ -5672,28 +5718,38 @@ ${consults || "-"}
 
   function aoeWordPatient(p) {
     const meta = extractCardMeta(p);
+    const consultFacts = aoeConsultFacts(p);
+    const surgery = aoeSurgeryInfo(p);
+    const diet = compactDietInfo(p.diyet || "");
     const title = [doctorInitials(p.doktor), p.oda, p.adSoyad, p.yas].filter(Boolean).join("-");
     const paragraphs = [
       aoeWordParagraph(title, { size:15, bold:true, keep:true }),
-      aoeWordParagraph("TANI: " + (p.tani || "—"), { size:9, bold:true }),
-      aoeWordParagraph("OP: " + (meta.go || p.plannedOperation || "—"), { size:9, bold:true }),
+      aoeWordParagraph("", { size:9 }),
+      aoeWordParagraph("TANI: " + (consultFacts.diagnosis || p.tani || "—"), { size:9, bold:true }),
+      aoeWordParagraph("OP: " + (meta.go || p.plannedOperation || consultFacts.go || "—"), { size:9, bold:true }),
       aoeWordParagraph("PLAN: " + (p.plan || "—"), { size:9, bold:true }),
       aoeWordParagraph("Yatış Tarihi: " + (aoeDate(p.yatis) || "—"), { size:9, bold:true }),
-      aoeWordParagraph("BH: " + (meta.bh || p.knownDiseases || "—"), { size:9 }),
-      aoeWordParagraph("Kİ: " + (meta.ki || p.homeMeds || "—"), { size:9 }),
-      aoeWordParagraph("GO: " + (meta.go || p.plannedOperation || "—"), { size:9 }),
-      aoeWordParagraph("-----------------------------------------------------", { size:9 }),
+      aoeWordParagraph("Op Tarihi: " + (surgery.date || "—"), { size:9, bold:true }),
+      aoeWordParagraph("PO-R: " + (surgery.badge || "—"), { size:9, bold:true }),
+      aoeWordParagraph("Rejim: " + ([diet.code, diet.extra].filter((x) => x && x !== "-").join(" / ") || "—"), { size:9, bold:true }),
+      aoeWordParagraph("BH: " + (meta.bh || p.knownDiseases || consultFacts.bh || "—"), { size:9 }),
+      aoeWordParagraph("Kİ: " + (meta.ki || p.homeMeds || consultFacts.ki || "—"), { size:9 }),
+      aoeWordParagraph("GO: " + (meta.go || p.plannedOperation || consultFacts.go || "—"), { size:9 }),
+      aoeWordParagraph("-----------------------------------------------------", { size:9 })
     ];
     const labs = compactLabVitalsText(p.labs || {}, latestVitalLine(p.vitals || [], p));
-    if (labs) paragraphs.push(aoeWordParagraph(labs, { size:9 }));
+    paragraphs.push(aoeWordParagraph("Laboratuvar:", { size:9, bold:true, keep:true }));
+    paragraphs.push(aoeWordParagraph(labs || "—", { size:9 }), aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Order:", { size:9, bold:true, keep:true }));
     const orders = aoeOrderData(p.orders || []);
     if (orders.length) orders.forEach((x, index) => paragraphs.push(
       aoeWordParagraph((index + 1) + ". " + x.name + " — Doz: " + x.dose + " — Başlangıç: " + x.start, { size:9 })
     ));
     else paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    paragraphs.push(aoeWordParagraph("", { size:9 }));
     const nurse = (p.nursing || [])[0];
-    paragraphs.push(aoeWordParagraph("Gözlem: " + (nurse ? "(" + aoeDate(nurse.date) + ") " + nurse.text : "—"), { size:9 }));
+    paragraphs.push(aoeWordParagraph("Gözlem:", { size:9, bold:true, keep:true }));
+    paragraphs.push(aoeWordParagraph(nurse ? "(" + aoeDate(nurse.date) + ") " + nurse.text : "—", { size:9 }), aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Takip:", { size:9, bold:true, keep:true }));
     const clinicalRows = Array.isArray(p.clinicalHistory) && p.clinicalHistory.length
       ? p.clinicalHistory : (p.clinical ? [{ date:p.clinicalDate || "", text:p.clinical }] : []);
@@ -5701,19 +5757,22 @@ ${consults || "-"}
       aoeWordParagraph("(" + (aoeDate(x.date || x.tarih) || "—") + ") " + (x.text || x.klinikIzlem || x.aciklama || ""), { size:9 })
     ));
     else paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Konsültasyonlar:", { size:9, bold:true, keep:true }));
-    (p.consults || []).forEach((x) => paragraphs.push(aoeWordParagraph(
-      "(" + (aoeDate(x.date) || "—") + ") " + (x.unit || "Konsültasyon") +
-      (x.request ? "\nİstem: " + x.request : "") + (x.answer ? "\nCevap: " + x.answer : ""), { size:9 }
+    const answeredConsults = (p.consults || []).filter((x) => clean(x.answer));
+    answeredConsults.forEach((x) => paragraphs.push(aoeWordParagraph(
+      "(" + (aoeDate(x.date) || "—") + ") " + (x.unit || "Konsültasyon") + "\n" + x.answer, { size:9 }
     )));
-    if (!(p.consults || []).length) paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    if (!answeredConsults.length) paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Görüntüleme:", { size:10, bold:true, keep:true }));
-    (p.radiology || []).forEach((x) => paragraphs.push(aoeWordParagraph(
-      (aoeDate(x.date || x.reportDate) || "—") + ": " + (x.name || x.service || x.tetkik || "Görüntüleme") +
+    const namedImaging = (p.radiology || []).filter((x) => clean(x.exam || x.name || x.service || x.tetkik));
+    namedImaging.forEach((x) => paragraphs.push(aoeWordParagraph(
+      (aoeDate(x.date || x.reportDate) || "—") + ": " + (x.exam || x.name || x.service || x.tetkik) +
       ((x.reportText || x.report) ? "\n" + (x.reportText || x.report) : ""), { size:10 }
     )));
-    if (!(p.radiology || []).length) paragraphs.push(aoeWordParagraph("—", { size:10 }));
-    paragraphs.push(aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }));
+    if (!namedImaging.length) paragraphs.push(aoeWordParagraph("—", { size:10 }));
+    paragraphs.push(aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }));
     return paragraphs.join("");
   }
 
