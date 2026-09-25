@@ -3269,7 +3269,7 @@ ${consults || "-"}
       limit: 100,
       sort: JSON.stringify([{ property: "tarih", direction: "DESC" }])
     });
-    p.nursing = (data.data || []).slice().sort((a, b) => parseTrDate(b.tarih) - parseTrDate(a.tarih)).slice(0, 1).map((x) => ({
+    p.nursing = (data.data || []).slice().sort((a, b) => parseTrDate(b.tarih) - parseTrDate(a.tarih)).slice(0, 2).map((x) => ({
       id: x.id,
       date: x.tarih,
       text: x.hemsireDevirNotu || ""
@@ -5640,14 +5640,21 @@ ${consults || "-"}
     return [badge, regime].filter(Boolean).join("-") || "—";
   }
 
-  function aoeLatestNursing(p) {
-    const latest = (p.nursing || []).filter((x) => clean(x?.text)).slice().sort((a, b) => {
+  function aoeLatestNursingRows(p) {
+    return (p.nursing || []).filter((x) => clean(x?.text)).slice().sort((a, b) => {
       const aTime = parseTrDate(a.date) || 0;
       const bTime = parseTrDate(b.date) || 0;
       return bTime - aTime;
-    })[0] || null;
-    if (!latest) return null;
-    return { ...latest, text:cleanMultiline(latest.text || "") };
+    }).slice(0, 2).map((item) => ({ ...item, text:cleanMultiline(item.text || "") }));
+  }
+
+  function aoeLatestClinical(p) {
+    const rows = Array.isArray(p.clinicalHistory) && p.clinicalHistory.length
+      ? p.clinicalHistory
+      : (p.clinical ? [{ date:p.clinicalDate || "", text:p.clinical }] : []);
+    return rows.filter((x) => clean(x?.text || x?.klinikIzlem || x?.aciklama)).slice().sort((a, b) =>
+      (parseTrDate(b.date || b.tarih) || 0) - (parseTrDate(a.date || a.tarih) || 0)
+    )[0] || null;
   }
 
   function aoePatientKeys(p) {
@@ -5700,14 +5707,15 @@ ${consults || "-"}
     const fixed = aoeFixedFor(p);
     const title = [doctorInitials(p.doktor), p.oda, fixed.name || p.adSoyad, p.yas].filter(Boolean).join("-");
     const orders = aoeOrderLines(p.orders || []);
-    const clinicalRows = Array.isArray(p.clinicalHistory) && p.clinicalHistory.length
-      ? p.clinicalHistory
-      : (p.clinical ? [{ date: p.clinicalDate || "", text: p.clinical }] : []);
-    const clinical = clinicalRows.map((x) =>
+    const clinicalRow = aoeLatestClinical(p);
+    const clinical = clinicalRow ? [clinicalRow].map((x) =>
       "<div><b>(" + aoeEsc(aoeDate(x.date || x.tarih) || "—") + ")</b> " +
       aoeEsc(x.text || x.klinikIzlem || x.aciklama || "") + "</div>"
+    ).join("") : "—";
+    const nursingRows = aoeLatestNursingRows(p);
+    const nursing = nursingRows.map((x) =>
+      "<div><b>(" + aoeEsc(aoeDate(x.date) || "—") + ")</b> " + aoeEsc(x.text) + "</div>"
     ).join("") || "—";
-    const nurse = aoeLatestNursing(p);
     const imaging = (p.radiology || []).filter((x) => aoeImagingName(x)).map((x) =>
       "<div><b>" + aoeEsc(aoeDate(x.date || x.reportDate) || "—") + ": " +
       aoeEsc(aoeImagingName(x)) + "</b>" +
@@ -5733,7 +5741,7 @@ ${consults || "-"}
       '<div class="rule"></div>' +
       (labTable ? '<div><b>Laboratuvar:</b></div><div class="labs">' + labTable + '</div><div class="section-gap">&nbsp;</div>' : "") +
       '<div><b>Order:</b></div>' + orders + '<div class="section-gap">&nbsp;</div>' +
-      '<div><b>Gözlem:</b> ' + (nurse ? "<b>(" + aoeEsc(aoeDate(nurse.date)) + ")</b> " + aoeEsc(nurse.text) : "—") + '</div><div class="section-gap">&nbsp;</div>' +
+      '<div><b>Gözlem:</b>' + nursing + '</div><div class="section-gap">&nbsp;</div>' +
       '<div><b>Takip:</b>' + clinical + '</div><div class="section-gap">&nbsp;</div>' +
       '<div><b>Konsültasyonlar:</b>' + consults + '</div><div class="section-gap">&nbsp;</div>' +
       '<div class="imaging"><b>Görüntüleme:</b>' + imaging + '</div><div class="section-gap">&nbsp;</div>' +
@@ -5890,16 +5898,19 @@ ${consults || "-"}
     ));
     else paragraphs.push(aoeWordParagraph("—", { size:9 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }));
-    const nurse = aoeLatestNursing(p);
+    const nursingRows = aoeLatestNursingRows(p);
     paragraphs.push(aoeWordParagraph("Gözlem:", { size:9, bold:true, keep:true }));
-    paragraphs.push(aoeWordParagraph(nurse ? "(" + aoeDate(nurse.date) + ") " + nurse.text : "—", { size:9 }), aoeWordParagraph("", { size:9 }));
-    paragraphs.push(aoeWordParagraph("Takip:", { size:9, bold:true, keep:true }));
-    const clinicalRows = Array.isArray(p.clinicalHistory) && p.clinicalHistory.length
-      ? p.clinicalHistory : (p.clinical ? [{ date:p.clinicalDate || "", text:p.clinical }] : []);
-    if (clinicalRows.length) clinicalRows.forEach((x) => paragraphs.push(
-      aoeWordParagraph("(" + (aoeDate(x.date || x.tarih) || "—") + ") " + (x.text || x.klinikIzlem || x.aciklama || ""), { size:9 })
+    if (nursingRows.length) nursingRows.forEach((x) => paragraphs.push(
+      aoeWordParagraph("(" + (aoeDate(x.date) || "—") + ") " + x.text, { size:9 })
     ));
     else paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    paragraphs.push(aoeWordParagraph("", { size:9 }));
+    paragraphs.push(aoeWordParagraph("Takip:", { size:9, bold:true, keep:true }));
+    const clinicalRow = aoeLatestClinical(p);
+    if (clinicalRow) paragraphs.push(aoeWordParagraph(
+      "(" + (aoeDate(clinicalRow.date || clinicalRow.tarih) || "—") + ") " +
+      (clinicalRow.text || clinicalRow.klinikIzlem || clinicalRow.aciklama || ""), { size:9 }
+    )); else paragraphs.push(aoeWordParagraph("—", { size:9 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Konsültasyonlar:", { size:9, bold:true, keep:true }));
     const answeredConsults = (p.consults || []).filter((x) => clean(x.answer));
