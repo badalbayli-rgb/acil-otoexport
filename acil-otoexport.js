@@ -5701,8 +5701,8 @@ ${consults || "-"}
       x.answer ? "<div><b>(" + aoeEsc(aoeDate(x.date) || "—") + ") " + aoeEsc(x.unit || "Konsültasyon") +
       "</b><br>" + aoeEsc(x.answer) + "</div>" : ""
     ).join("") || "—";
-    const labs = typeof compactLabVitalsText === "function"
-      ? compactLabVitalsText(p.labs || {}, latestVitalLine(p.vitals || [], p)) : "";
+    const labTable = typeof visitLabTableHtml === "function"
+      ? visitLabTableHtml(p.labs || {}, latestVitalLine(p.vitals || [], p)) : "";
     return '<section class="patient">' +
       '<div class="patient-title">' + aoeEsc(title) + '</div><div class="section-gap">&nbsp;</div>' +
       '<div><b>TANI:</b> ' + aoeEsc(fixed.diagnosis || "—") + '</div>' +
@@ -5715,7 +5715,7 @@ ${consults || "-"}
       '<div><b>Kİ:</b> ' + aoeEsc(fixed.ki || "—") + '</div>' +
       '<div><b>GO:</b> ' + aoeEsc(fixed.go || "—") + '</div>' +
       '<div class="rule"></div>' +
-      (labs ? '<div><b>Laboratuvar:</b></div><div class="labs">' + aoeEsc(labs).replace(/\n/g,"<br>") + '</div><div class="section-gap">&nbsp;</div>' : "") +
+      (labTable ? '<div><b>Laboratuvar:</b></div><div class="labs">' + labTable + '</div><div class="section-gap">&nbsp;</div>' : "") +
       '<div><b>Order:</b></div>' + orders + '<div class="section-gap">&nbsp;</div>' +
       '<div><b>Gözlem:</b> ' + (nurse ? "<b>(" + aoeEsc(aoeDate(nurse.date)) + ")</b> " + aoeEsc(nurse.text) : "—") + '</div><div class="section-gap">&nbsp;</div>' +
       '<div><b>Takip:</b>' + clinical + '</div><div class="section-gap">&nbsp;</div>' +
@@ -5790,6 +5790,60 @@ ${consults || "-"}
       '" w:line="180" w:lineRule="auto"/></w:pPr>' + runs + '</w:p>';
   }
 
+  function aoeWordTableCell(text, options = {}) {
+    const width = Number(options.width || 420);
+    const span = Math.max(1, Number(options.span || 1));
+    const size = Math.round(Number(options.size || 6.5) * 2);
+    const bold = options.bold ? "<w:b/>" : "";
+    const align = options.align || "center";
+    const shade = options.shade ? '<w:shd w:val="clear" w:color="auto" w:fill="' + options.shade + '"/>' : "";
+    return '<w:tc><w:tcPr><w:tcW w:w="' + width + '" w:type="dxa"/>' +
+      (span > 1 ? '<w:gridSpan w:val="' + span + '"/>' : "") + shade +
+      '<w:tcMar><w:top w:w="12" w:type="dxa"/><w:left w:w="24" w:type="dxa"/>' +
+      '<w:bottom w:w="12" w:type="dxa"/><w:right w:w="24" w:type="dxa"/></w:tcMar></w:tcPr>' +
+      '<w:p><w:pPr><w:jc w:val="' + align + '"/><w:spacing w:before="0" w:after="0" w:line="150" w:lineRule="auto"/></w:pPr>' +
+      '<w:r><w:rPr><w:rFonts w:ascii="Arial Narrow" w:hAnsi="Arial Narrow" w:cs="Arial Narrow"/>' +
+      bold + '<w:sz w:val="' + size + '"/><w:szCs w:val="' + size + '"/></w:rPr>' +
+      '<w:t xml:space="preserve">' + aoeXml(text || "") + '</w:t></w:r></w:p></w:tc>';
+  }
+
+  function aoeWordLabTable(labs = {}, vitalLine = "") {
+    const dates = labVisitDates(labs, 8);
+    const border = '<w:tblBorders><w:top w:val="single" w:sz="2" w:color="D9DEE6"/>' +
+      '<w:left w:val="single" w:sz="2" w:color="D9DEE6"/><w:bottom w:val="single" w:sz="2" w:color="D9DEE6"/>' +
+      '<w:right w:val="single" w:sz="2" w:color="D9DEE6"/><w:insideH w:val="single" w:sz="2" w:color="E5E7EB"/>' +
+      '<w:insideV w:val="single" w:sz="2" w:color="E5E7EB"/></w:tblBorders>';
+    if (!dates.length) {
+      if (!vitalLine) return aoeWordParagraph("—", { size:9 });
+      return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/>' + border + '</w:tblPr>' +
+        '<w:tblGrid><w:gridCol w:w="650"/><w:gridCol w:w="3100"/></w:tblGrid>' +
+        '<w:tr>' + aoeWordTableCell("Tetkik", { width:650, bold:true, shade:"EEF2F7", align:"left" }) +
+        aoeWordTableCell("Son", { width:3100, bold:true, shade:"EEF2F7" }) + '</w:tr>' +
+        '<w:tr>' + aoeWordTableCell("Vital", { width:650, bold:true, align:"left" }) +
+        aoeWordTableCell(vitalLine, { width:3100, align:"left" }) + '</w:tr></w:tbl>';
+    }
+    const firstWidth = 610;
+    const dataWidth = Math.max(350, Math.floor(3140 / dates.length));
+    const grid = '<w:tblGrid><w:gridCol w:w="' + firstWidth + '"/>' +
+      dates.map(() => '<w:gridCol w:w="' + dataWidth + '"/>').join("") + '</w:tblGrid>';
+    const header = '<w:tr>' + aoeWordTableCell("Tetkik", { width:firstWidth, bold:true, shade:"EEF2F7", align:"left" }) +
+      dates.map((d) => aoeWordTableCell(d.label, { width:dataWidth, bold:true, shade:"EEF2F7" })).join("") + '</w:tr>';
+    const rows = VISIT_LAB_ROWS.map((key) => {
+      const cells = dates.map((d) => {
+        const raw = labValueForDate(labs, key, d.label);
+        return aoeWordTableCell(visitLabCellText(key, raw), { width:dataWidth, bold:abnormalLabValue(key, raw) });
+      }).join("");
+      return '<w:tr>' + aoeWordTableCell(VISIT_LAB_LABELS[key] || key, { width:firstWidth, bold:true, align:"left" }) + cells + '</w:tr>';
+    }).join("");
+    const fullDataWidth = dataWidth * dates.length;
+    const electro = '<w:tr>' + aoeWordTableCell("Elekt", { width:firstWidth, bold:true, align:"left" }) +
+      aoeWordTableCell(latestElectrolyteText(labs), { width:fullDataWidth, span:dates.length, align:"left" }) + '</w:tr>';
+    const vital = vitalLine ? '<w:tr>' + aoeWordTableCell("Vital", { width:firstWidth, bold:true, align:"left" }) +
+      aoeWordTableCell(vitalLine, { width:fullDataWidth, span:dates.length, align:"left" }) + '</w:tr>' : "";
+    return '<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/><w:tblLayout w:type="fixed"/>' + border +
+      '</w:tblPr>' + grid + header + rows + electro + vital + '</w:tbl>';
+  }
+
   function aoeWordPatient(p) {
     const meta = extractCardMeta(p);
     const consultFacts = aoeConsultFacts(p);
@@ -5811,9 +5865,8 @@ ${consults || "-"}
       aoeWordParagraph("GO: " + (fixed.go || "—"), { size:9 }),
       aoeWordParagraph("-----------------------------------------------------", { size:9 })
     ];
-    const labs = compactLabVitalsText(p.labs || {}, latestVitalLine(p.vitals || [], p));
     paragraphs.push(aoeWordParagraph("Laboratuvar:", { size:9, bold:true, keep:true }));
-    paragraphs.push(aoeWordParagraph(labs || "—", { size:9 }), aoeWordParagraph("", { size:9 }));
+    paragraphs.push(aoeWordLabTable(p.labs || {}, latestVitalLine(p.vitals || [], p)), aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Order:", { size:9, bold:true, keep:true }));
     const orders = aoeOrderData(p.orders || []);
     if (orders.length) orders.forEach((x, index) => paragraphs.push(
