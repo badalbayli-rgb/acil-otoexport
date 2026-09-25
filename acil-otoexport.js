@@ -6213,26 +6213,71 @@ ${consults || "-"}
     const bytes = new Uint8Array(await file.arrayBuffer());
     const decoder = new TextDecoder();
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const entries = {}; let offset = 0;
-    while (offset + 30 <= bytes.length && view.getUint32(offset, true) === 0x04034b50) {
-      const method = view.getUint16(offset + 8, true);
-      const compressedSize = view.getUint32(offset + 18, true);
-      const nameLength = view.getUint16(offset + 26, true);
-      const extraLength = view.getUint16(offset + 28, true);
-      const name = decoder.decode(bytes.slice(offset + 30, offset + 30 + nameLength));
-      const dataStart = offset + 30 + nameLength + extraLength;
-      const compressed = bytes.slice(dataStart, dataStart + compressedSize);
+    if (bytes.length < 22) throw new Error("Geçerli bir DOCX dosyası seçin.");
+    // Word ZIP girişlerinde boyutları yerel başlık yerine veri tanımlayıcısında tutabilir.
+    // Merkezi dizin gerçek boyutu ve giriş konumunu her iki durumda da verir.
+    let end = -1;
+    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65535); i -= 1) {
+      if (view.getUint32(i, true) === 0x06054b50 && i + 22 + view.getUint16(i + 20, true) === bytes.length) {
+        end = i;
+        break;
+      }
+    }
+    if (end < 0) throw new Error("DOCX içindeki ZIP dizini okunamadı.");
+    const count = view.getUint16(end + 10, true);
+    const centralSize = view.getUint32(end + 12, true);
+    const centralOffset = view.getUint32(end + 16, true);
+    if (count === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) {
+      throw new Error("ZIP64 biçimindeki DOCX dosyası desteklenmiyor.");
+    }
+    if (centralOffset + centralSize > end) throw new Error("DOCX içindeki ZIP dizini bozuk.");
+    const entries = {}; let offset = centralOffset;
+    for (let i = 0; i < count; i += 1) {
+      if (offset + 46 > end || view.getUint32(offset, true) !== 0x02014b50) {
+        throw new Error("DOCX içindeki ZIP dizini bozuk.");
+      }
+      const flags = view.getUint16(offset + 8, true);
+      const method = view.getUint16(offset + 10, true);
+      const crc = view.getUint32(offset + 16, true);
+      const compressedSize = view.getUint32(offset + 20, true);
+      const uncompressedSize = view.getUint32(offset + 24, true);
+      const nameLength = view.getUint16(offset + 28, true);
+      const extraLength = view.getUint16(offset + 30, true);
+      const commentLength = view.getUint16(offset + 32, true);
+      const localOffset = view.getUint32(offset + 42, true);
+      const next = offset + 46 + nameLength + extraLength + commentLength;
+      if (next > end) throw new Error("DOCX içindeki ZIP dizini bozuk.");
+      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
+      offset = next;
+      if (name !== "word/document.xml" && name !== "word/acil-otoexport-data.xml") continue;
+      if (flags & 1) throw new Error("Şifreli DOCX dosyası açılamıyor.");
+      if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
+        throw new Error("ZIP64 biçimindeki DOCX dosyası desteklenmiyor.");
+      }
+      if (localOffset + 30 > bytes.length || view.getUint32(localOffset, true) !== 0x04034b50) {
+        throw new Error("DOCX içindeki dosya başlığı bozuk.");
+      }
+      const dataStart = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
+      if (dataStart + compressedSize > bytes.length) throw new Error("DOCX içindeki dosya eksik.");
+      const compressed = bytes.subarray(dataStart, dataStart + compressedSize);
       let data = compressed;
       if (method === 8) {
-        if (typeof DecompressionStream !== "function") throw new Error("Sıkıştırılmış DOCX bu tarayıcıda açılamıyor");
-        const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-        data = new Uint8Array(await new Response(stream).arrayBuffer());
+        if (typeof DecompressionStream !== "function") throw new Error("Sıkıştırılmış DOCX bu tarayıcıda açılamıyor.");
+        try {
+          const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+          data = new Uint8Array(await new Response(stream).arrayBuffer());
+        } catch (e) {
+          throw new Error("DOCX içindeki sıkıştırılmış dosya açılamadı: " + name);
+        }
       } else if (method !== 0) {
         throw new Error("Desteklenmeyen DOCX sıkıştırma yöntemi: " + method);
       }
+      if (data.length !== uncompressedSize || aoeCrc32(data) !== crc) {
+        throw new Error("DOCX içindeki dosya bozuk: " + name);
+      }
       entries[name] = decoder.decode(data);
-      offset = dataStart + compressedSize;
     }
+    if (!entries["word/document.xml"]) throw new Error("DOCX içinde Word belgesi bulunamadı.");
     return entries;
   }
 
