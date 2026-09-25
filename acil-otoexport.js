@@ -1118,9 +1118,24 @@
     }
   }
 
+  function safeDateParts(date) {
+    const raw = String(date == null ? "" : date).trim();
+    let m = raw.match(/(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (m) return { day:Number(m[1]), month:Number(m[2]), year:Number(m[3]), hour:Number(m[4] || 0), minute:Number(m[5] || 0), second:Number(m[6] || 0) };
+    m = raw.match(/(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    if (m) return { day:Number(m[3]), month:Number(m[2]), year:Number(m[1]), hour:Number(m[4] || 0), minute:Number(m[5] || 0), second:Number(m[6] || 0) };
+    const epoch = raw.match(/\/Date\((\d{10,13})/i)?.[1] || (/^\d{10,13}$/.test(raw) ? raw : "");
+    if (epoch) {
+      const n = Number(epoch) * (epoch.length === 10 ? 1000 : 1);
+      const d = new Date(n);
+      if (!Number.isNaN(d.getTime())) return { day:d.getDate(), month:d.getMonth()+1, year:d.getFullYear(), hour:d.getHours(), minute:d.getMinutes(), second:d.getSeconds() };
+    }
+    return null;
+  }
+
   function shortDate(date) {
-    const m = String(date || "").match(/(\d{2})[./](\d{2})[./](\d{4})/);
-    return m ? `${m[1]}.${m[2]}` : "";
+    const p = safeDateParts(date);
+    return p ? `${String(p.day).padStart(2,"0")}.${String(p.month).padStart(2,"0")}` : "";
   }
 
   function shortTime(date) {
@@ -1129,14 +1144,13 @@
   }
 
   function dateTimeKey(date) {
-    const m = String(date || "").match(/(\d{2})[./](\d{2})[./](\d{4})\s+(\d{2}):(\d{2})/);
-    return m ? `${m[3]}${m[2]}${m[1]}${m[4]}${m[5]}` : "";
+    const p = safeDateParts(date);
+    return p ? [p.year,p.month,p.day,p.hour,p.minute,p.second].map((x,i) => String(x).padStart(i ? 2 : 4,"0")).join("") : "";
   }
 
   function parseTrDate(date) {
-    const m = String(date || "").match(/(\d{2})[./](\d{2})[./](\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?/);
-    if (!m) return 0;
-    return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6] || 0)).getTime();
+    const p = safeDateParts(date);
+    return p ? new Date(p.year, p.month - 1, p.day, p.hour, p.minute, p.second).getTime() : 0;
   }
 
   function cleanMultiline(text) {
@@ -3255,7 +3269,7 @@ ${consults || "-"}
       limit: 100,
       sort: JSON.stringify([{ property: "tarih", direction: "DESC" }])
     });
-    p.nursing = (data.data || []).slice(0, 3).map((x) => ({
+    p.nursing = (data.data || []).slice().sort((a, b) => parseTrDate(b.tarih) - parseTrDate(a.tarih)).slice(0, 1).map((x) => ({
       id: x.id,
       date: x.tarih,
       text: x.hemsireDevirNotu || ""
@@ -5627,11 +5641,13 @@ ${consults || "-"}
   }
 
   function aoeLatestNursing(p) {
-    return (p.nursing || []).slice().sort((a, b) => {
+    const latest = (p.nursing || []).filter((x) => clean(x?.text)).slice().sort((a, b) => {
       const aTime = parseTrDate(a.date) || 0;
       const bTime = parseTrDate(b.date) || 0;
       return bTime - aTime;
     })[0] || null;
+    if (!latest) return null;
+    return { ...latest, text:cleanMultiline(latest.text || "") };
   }
 
   function aoePatientKeys(p) {
