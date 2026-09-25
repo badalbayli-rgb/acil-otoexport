@@ -3172,6 +3172,10 @@ ${consults || "-"}
       .join(", ");
     const izlem = d.klinikIzlemList || [];
     p.clinical = izlem[0]?.klinikIzlem || p.clinical || "";
+    p.clinicalHistory = izlem.map((x) => ({
+      date: x.tarih || x.eklemeTarihi || x.kayitTarihi || x.guncellemeTarihi || "",
+      text: x.klinikIzlem || x.aciklama || x.not || ""
+    })).filter((x) => x.text);
   }
 
   function parseSevkInfo(data, p) {
@@ -5510,13 +5514,58 @@ ${consults || "-"}
     return m ? m[1] + "." + m[2] + "." + m[3] : clean(v);
   }
 
+  function aoeDrugName(value) {
+    const original = clean(value).toLocaleUpperCase("tr-TR");
+    const ingredientNames = [
+      "METRONİDAZOL", "METRONIDAZOL", "SEFTRİAKSON", "SEFTRIAKSON",
+      "PİPERASİLİN", "PIPERASILIN", "TAZOBAKTAM", "MEROPENEM",
+      "VANKOMİSİN", "VANKOMISIN", "PARASETAMOL", "ALBÜMİN", "ALBUMIN"
+    ];
+    const ingredient = ingredientNames.find((name) => original.includes(name));
+    if (ingredient) return ingredient.replace("METRONIDAZOL", "METRONİDAZOL").replace("SEFTRIAKSON", "SEFTRİAKSON");
+    const firstWord = original.split(/\s+/)[0] || "İLAÇ";
+    const strength = original.match(/\b\d+(?:[.,]\d+)?\s*(?:MG|MCG|G|ANTI-XA\s*IU|IU)\b/i)?.[0] || "";
+    const normalizedBrand = firstWord === "ARMASEFT" ? "ARMASEF" : firstWord;
+    return [normalizedBrand, /^OKSAPAR$/i.test(normalizedBrand) ? strength : ""].filter(Boolean).join(" ");
+  }
+
+  function aoeOrderLines(orders) {
+    const seen = new Set();
+    const rows = [];
+    (orders || []).forEach((x) => {
+      const name = aoeDrugName(x.name || x.adi || "");
+      const dose = clean(x.dose || x.doz || x.usage || x.kullanimSekli || x.amount || x.miktar || "—");
+      const start = aoeDate(x.start || x.startDate || x.baslangicTarihi) || "—";
+      const key = [name, dose, start].join("|");
+      if (!name || seen.has(key)) return;
+      seen.add(key);
+      rows.push({ name, dose, start });
+    });
+    return rows.map((x, index) =>
+      '<div class="order-row"><b>' + (index + 1) + '. ' + aoeEsc(x.name) + '</b> — Doz: ' +
+      aoeEsc(x.dose) + ' — Başlangıç: ' + aoeEsc(x.start) + '</div>'
+    ).join("") || "—";
+  }
+
+  function aoeOrderData(orders) {
+    const seen = new Set();
+    return (orders || []).map((x) => {
+      const row = {
+        name: aoeDrugName(x.name || x.adi || ""),
+        dose: clean(x.dose || x.doz || x.usage || x.kullanimSekli || x.amount || x.miktar || "—"),
+        start: aoeDate(x.start || x.startDate || x.baslangicTarihi) || "—"
+      };
+      const key = [row.name, row.dose, row.start].join("|");
+      if (!row.name || seen.has(key)) return null;
+      seen.add(key);
+      return row;
+    }).filter(Boolean);
+  }
+
   function aoePatientHtml(p) {
     const meta = extractCardMeta(p);
     const title = [doctorInitials(p.doktor), p.oda, p.adSoyad, p.yas].filter(Boolean).join("-");
-    const orders = (p.orders || []).map((x) => {
-      const start = aoeDate(x.start || x.startDate || x.baslangicTarihi);
-      return x.name ? "<b>" + aoeEsc(x.name) + "</b>" + (start ? " (" + aoeEsc(start) + ")" : "") : "";
-    }).filter(Boolean).join(" + ") || "—";
+    const orders = aoeOrderLines(p.orders || []);
     const clinicalRows = Array.isArray(p.clinicalHistory) && p.clinicalHistory.length
       ? p.clinicalHistory
       : (p.clinical ? [{ date: p.clinicalDate || "", text: p.clinical }] : []);
@@ -5552,8 +5601,8 @@ ${consults || "-"}
       '<div><b>Gözlem:</b> ' + (nurse ? "<b>(" + aoeEsc(aoeDate(nurse.date)) + ")</b> " + aoeEsc(nurse.text) : "—") + '</div>' +
       '<div><b>Takip:</b>' + clinical + '</div>' +
       '<div><b>Konsültasyonlar:</b>' + consults + '</div>' +
-      '<div><b>Görüntüleme:</b>' + imaging + '</div>' +
-      '</section>';
+      '<div class="imaging"><b>Görüntüleme:</b>' + imaging + '</div>' +
+      '</section><div class="patient-gap">&nbsp;<br>&nbsp;</div>';
   }
 
   function aoeSplitColumns(patients) {
@@ -5578,34 +5627,175 @@ ${consults || "-"}
       'table.columns>tbody>tr>td{width:50%;vertical-align:top;padding:0 9pt}' +
       'table.columns>tbody>tr>td:first-child{border-right:1px solid #aaa;padding-left:0}' +
       'table.columns>tbody>tr>td:last-child{padding-right:0}' +
-      '.patient{margin:0 0 7pt;padding:0;font-size:9pt;line-height:1.03}' +
+      '.patient,.patient *{font-family:Tahoma,Arial,sans-serif;font-size:9pt}' +
+      '.patient{margin:0;padding:0;line-height:1.03}' +
       '.patient-title{font-size:15pt;line-height:1.0;font-weight:bold;margin:0 0 1pt}' +
       '.patient div{margin:0;padding:0}.rule{border-top:1px dashed #333;margin:3pt 0!important}' +
-      '.labs{font-size:9pt}.patient b{font-weight:bold}' +
+      '.labs{font-size:9pt}.imaging,.imaging *{font-size:10pt}.patient b{font-weight:bold}' +
+      '.patient-gap{font-family:Tahoma,Arial,sans-serif;font-size:9pt;line-height:9pt;height:18pt}' +
       '</style></head><body><div class="title">ACİL OTOEXPORT</div>' +
       '<table class="columns"><tbody><tr><td>' + columns[0] + '</td><td>' + columns[1] +
       '</td></tr></tbody></table></body></html>';
   }
 
-  function aoeDownloadWord() {
-    if (!(state.patients || []).length) return alert("Önce hastaları yenileyin.");
-    const blob = new Blob(["\ufeff", aoeDocumentHtml()], { type:"application/msword;charset=utf-8" });
+  function aoeReadiness() {
+    const total = Number(state.metrics?.total || state.patients?.length || 0);
+    const processed = Number(state.metrics?.processed || 0);
+    const failures = (state.patients || []).reduce((sum, p) => sum + (p.lastFailedLabels || []).length, 0);
+    const loading = (state.patients || []).filter((p) => p.loading).length;
+    const ready = Boolean(state.bootstrapComplete && !state.busy && total > 0 && processed >= total && !loading && !failures);
+    return { total, processed, failures, loading, ready };
+  }
+
+  function aoeXml(value) {
+    return String(value == null ? "" : value).replace(/[&<>"']/g, (ch) => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&apos;"
+    })[ch]);
+  }
+
+  function aoeWordParagraph(text, options = {}) {
+    const size = Math.round(Number(options.size || 9) * 2);
+    const bold = options.bold ? "<w:b/>" : "";
+    const before = Number(options.before || 0);
+    const after = Number(options.after || 0);
+    const keep = options.keep ? "<w:keepNext/>" : "";
+    const lines = String(text == null ? "" : text).split(/\n/);
+    const runs = lines.map((line, index) =>
+      (index ? "<w:r><w:br/></w:r>" : "") +
+      '<w:r><w:rPr><w:rFonts w:ascii="Tahoma" w:hAnsi="Tahoma" w:cs="Tahoma"/>' +
+      bold + '<w:sz w:val="' + size + '"/><w:szCs w:val="' + size + '"/></w:rPr>' +
+      '<w:t xml:space="preserve">' + aoeXml(line) + '</w:t></w:r>'
+    ).join("");
+    return '<w:p><w:pPr>' + keep + '<w:spacing w:before="' + before + '" w:after="' + after +
+      '" w:line="180" w:lineRule="auto"/></w:pPr>' + runs + '</w:p>';
+  }
+
+  function aoeWordPatient(p) {
+    const meta = extractCardMeta(p);
+    const title = [doctorInitials(p.doktor), p.oda, p.adSoyad, p.yas].filter(Boolean).join("-");
+    const paragraphs = [
+      aoeWordParagraph(title, { size:15, bold:true, keep:true }),
+      aoeWordParagraph("TANI: " + (p.tani || "—"), { size:9, bold:true }),
+      aoeWordParagraph("OP: " + (meta.go || p.plannedOperation || "—"), { size:9, bold:true }),
+      aoeWordParagraph("PLAN: " + (p.plan || "—"), { size:9, bold:true }),
+      aoeWordParagraph("Yatış Tarihi: " + (aoeDate(p.yatis) || "—"), { size:9, bold:true }),
+      aoeWordParagraph("BH: " + (meta.bh || p.knownDiseases || "—"), { size:9 }),
+      aoeWordParagraph("Kİ: " + (meta.ki || p.homeMeds || "—"), { size:9 }),
+      aoeWordParagraph("GO: " + (meta.go || p.plannedOperation || "—"), { size:9 }),
+      aoeWordParagraph("-----------------------------------------------------", { size:9 }),
+    ];
+    const labs = compactLabVitalsText(p.labs || {}, latestVitalLine(p.vitals || [], p));
+    if (labs) paragraphs.push(aoeWordParagraph(labs, { size:9 }));
+    paragraphs.push(aoeWordParagraph("Order:", { size:9, bold:true, keep:true }));
+    const orders = aoeOrderData(p.orders || []);
+    if (orders.length) orders.forEach((x, index) => paragraphs.push(
+      aoeWordParagraph((index + 1) + ". " + x.name + " — Doz: " + x.dose + " — Başlangıç: " + x.start, { size:9 })
+    ));
+    else paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    const nurse = (p.nursing || [])[0];
+    paragraphs.push(aoeWordParagraph("Gözlem: " + (nurse ? "(" + aoeDate(nurse.date) + ") " + nurse.text : "—"), { size:9 }));
+    paragraphs.push(aoeWordParagraph("Takip:", { size:9, bold:true, keep:true }));
+    const clinicalRows = Array.isArray(p.clinicalHistory) && p.clinicalHistory.length
+      ? p.clinicalHistory : (p.clinical ? [{ date:p.clinicalDate || "", text:p.clinical }] : []);
+    if (clinicalRows.length) clinicalRows.forEach((x) => paragraphs.push(
+      aoeWordParagraph("(" + (aoeDate(x.date || x.tarih) || "—") + ") " + (x.text || x.klinikIzlem || x.aciklama || ""), { size:9 })
+    ));
+    else paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    paragraphs.push(aoeWordParagraph("Konsültasyonlar:", { size:9, bold:true, keep:true }));
+    (p.consults || []).forEach((x) => paragraphs.push(aoeWordParagraph(
+      "(" + (aoeDate(x.date) || "—") + ") " + (x.unit || "Konsültasyon") +
+      (x.request ? "\nİstem: " + x.request : "") + (x.answer ? "\nCevap: " + x.answer : ""), { size:9 }
+    )));
+    if (!(p.consults || []).length) paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    paragraphs.push(aoeWordParagraph("Görüntüleme:", { size:10, bold:true, keep:true }));
+    (p.radiology || []).forEach((x) => paragraphs.push(aoeWordParagraph(
+      (aoeDate(x.date || x.reportDate) || "—") + ": " + (x.name || x.service || x.tetkik || "Görüntüleme") +
+      ((x.reportText || x.report) ? "\n" + (x.reportText || x.report) : ""), { size:10 }
+    )));
+    if (!(p.radiology || []).length) paragraphs.push(aoeWordParagraph("—", { size:10 }));
+    paragraphs.push(aoeWordParagraph("", { size:9 }), aoeWordParagraph("", { size:9 }));
+    return paragraphs.join("");
+  }
+
+  function aoeCrc32(bytes) {
+    let crc = -1;
+    for (const byte of bytes) {
+      crc ^= byte;
+      for (let j = 0; j < 8; j += 1) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+    }
+    return (crc ^ -1) >>> 0;
+  }
+
+  function aoeU16(value) { return new Uint8Array([value & 255, (value >>> 8) & 255]); }
+  function aoeU32(value) { return new Uint8Array([value & 255, (value >>> 8) & 255, (value >>> 16) & 255, (value >>> 24) & 255]); }
+  function aoeJoin(parts) {
+    const length = parts.reduce((sum, part) => sum + part.length, 0);
+    const out = new Uint8Array(length); let offset = 0;
+    parts.forEach((part) => { out.set(part, offset); offset += part.length; });
+    return out;
+  }
+
+  function aoeZip(files) {
+    const encoder = new TextEncoder(); const locals = []; const centrals = []; let offset = 0;
+    Object.entries(files).forEach(([name, content]) => {
+      const nameBytes = encoder.encode(name); const data = encoder.encode(content); const crc = aoeCrc32(data);
+      const local = aoeJoin([aoeU32(0x04034b50),aoeU16(20),aoeU16(0),aoeU16(0),aoeU16(0),aoeU16(0),aoeU32(crc),aoeU32(data.length),aoeU32(data.length),aoeU16(nameBytes.length),aoeU16(0),nameBytes,data]);
+      locals.push(local);
+      centrals.push(aoeJoin([aoeU32(0x02014b50),aoeU16(20),aoeU16(20),aoeU16(0),aoeU16(0),aoeU16(0),aoeU16(0),aoeU32(crc),aoeU32(data.length),aoeU32(data.length),aoeU16(nameBytes.length),aoeU16(0),aoeU16(0),aoeU16(0),aoeU16(0),aoeU32(0),aoeU32(offset),nameBytes]));
+      offset += local.length;
+    });
+    const central = aoeJoin(centrals);
+    return aoeJoin([...locals, central, aoeU32(0x06054b50),aoeU16(0),aoeU16(0),aoeU16(centrals.length),aoeU16(centrals.length),aoeU32(central.length),aoeU32(offset),aoeU16(0)]);
+  }
+
+  function aoeDocxBytes() {
+    const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) +
+      (state.patients || []).map(aoeWordPatient).join("");
+    const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + body +
+      '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1843" w:right="1121" w:bottom="1535" w:left="1005" w:header="720" w:footer="0"/><w:cols w:num="2" w:space="720" w:sep="1"/></w:sectPr></w:body></w:document>';
+    return aoeZip({
+      '[Content_Types].xml':'<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      '_rels/.rels':'<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+      'word/document.xml':documentXml
+    });
+  }
+
+  async function aoeEnsureReady() {
+    let info = aoeReadiness();
+    if (info.ready) return true;
+    if (state.busy) {
+      alert("Hasta taraması devam ediyor. Panelde Hazır göstergesi yeşile dönünce tekrar deneyin.");
+      return false;
+    }
+    await refreshAllDetails(true, "autoexport");
+    info = aoeReadiness();
+    if (!info.ready) {
+      alert(info.failures
+        ? "OtoExport durduruldu: " + info.failures + " veri bölümü alınamadı. Detayları yenileyip tekrar deneyin."
+        : "OtoExport durduruldu: tarama henüz tamamlanmadı.");
+      return false;
+    }
+    return true;
+  }
+
+  async function aoeDownloadWord() {
+    if (!(await aoeEnsureReady())) return;
+    const blob = new Blob([aoeDocxBytes()], { type:"application/vnd.openxmlformats-officedocument.wordprocessingml.document" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = "Acil-OtoExport-" + new Date().toISOString().slice(0,10) + ".doc";
+    a.download = "Acil-OtoExport-" + new Date().toISOString().slice(0,10) + ".docx";
     a.click();
     window.setTimeout(() => URL.revokeObjectURL(a.href), 5000);
   }
 
   async function aoeGoogleDocs() {
-    if (!(state.patients || []).length) return alert("Önce hastaları yenileyin.");
-    window.open("https://docs.new", "_blank");
+    if (!(await aoeEnsureReady())) return;
     const body = aoeDocumentHtml().match(/<body>([\s\S]*)<\/body>/i)?.[1] || aoeDocumentHtml();
     try {
-      await navigator.clipboard.write([new ClipboardItem({
-        "text/html": new Blob([body], { type:"text/html" }),
-        "text/plain": new Blob(["Acil OtoExport — " + state.patients.length + " hasta"], { type:"text/plain" })
-      })]);
+      const ok = await copyEditableHtml(body, "Acil OtoExport — " + state.patients.length + " hasta");
+      if (!ok) throw new Error("Biçimli içerik panoya alınamadı");
+      window.open("https://docs.new", "_blank");
       alert("Biçimli vizit kağıdı panoya kopyalandı. Açılan Google Dokümanına Ctrl+V ile yapıştırın.");
     } catch (e) {
       alert("Google Docs kopyalama başarısız: " + (e?.message || e));
@@ -5616,8 +5806,9 @@ ${consults || "-"}
     const root = uiEl("acil-otoexport-live-panel");
     if (!root || uiEl("aoe-word-all")) return;
     const holder = uiDocument().createElement("div");
-    holder.style.cssText = "display:flex;gap:6px;padding:6px 10px;background:#fff;border-bottom:1px solid #cbd5e1";
+    holder.style.cssText = "display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:6px 10px;background:#fff;border-bottom:1px solid #cbd5e1";
     holder.innerHTML =
+      '<div id="aoe-ready" style="grid-column:1/-1;padding:6px;border-radius:5px;background:#fee2e2;color:#991b1b;font-weight:bold">Tarama bekleniyor</div>' +
       '<button id="aoe-word-all" style="background:#166534;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Tümünü Word İndir</button>' +
       '<button id="aoe-docs-all" style="background:#1d4ed8;color:#fff;border:0;border-radius:5px;padding:7px 10px;font-weight:bold;cursor:pointer">Tümünü Google Docs</button>';
     root.prepend(holder);
@@ -5628,8 +5819,25 @@ ${consults || "-"}
   state.downloadAllWord = aoeDownloadWord;
   state.prepareAllGoogleDocs = aoeGoogleDocs;
   window.setInterval(() => {
-    if (state.active) aoeInstallExportButtons();
+    if (!state.active) return;
+    aoeInstallExportButtons();
+    const badge = uiEl("aoe-ready");
+    const word = uiEl("aoe-word-all");
+    const docs = uiEl("aoe-docs-all");
+    if (!badge) return;
+    const info = aoeReadiness();
+    if (info.ready) {
+      badge.textContent = "Hazır: " + info.total + "/" + info.total + " hasta tamamen tarandı";
+      badge.style.background = "#dcfce7"; badge.style.color = "#166534";
+    } else if (info.failures) {
+      badge.textContent = "Eksik: " + info.processed + "/" + info.total + " hasta, " + info.failures + " bölüm alınamadı";
+      badge.style.background = "#fef3c7"; badge.style.color = "#92400e";
+    } else {
+      badge.textContent = "Taranıyor: " + info.processed + "/" + info.total + " hasta";
+      badge.style.background = "#dbeafe"; badge.style.color = "#1e40af";
+    }
+    if (word) word.style.opacity = info.ready ? "1" : ".65";
+    if (docs) docs.style.opacity = info.ready ? "1" : ".65";
   }, 700);
 
 })();
-
