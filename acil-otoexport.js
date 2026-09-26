@@ -38,6 +38,7 @@
    * - V6.42: yüklenen DOCX'teki elle düzenlenmiş sabit alanlar ve açık listede olmayan hasta blokları aynen korunur
    * - V6.43: kalsiyum/laboratuvar Ca ifadelerinin yanlışlıkla kanser hastalığı olarak işaretlenmesi engellendi
    * - V6.44: yüklenen DOCX'teki sabit alanlar boş olsalar da kilitlenir; Word satır sonları güvenilir okunur
+ * - V6.46: yüklenen DOCX hasta sırası korunur; açık listede olmayan hastalar kendi yerinde kırmızı kalır
    * - V6.39: kompakt replasman satırlarında yazı, kolon, kontrast ve satır yüksekliği okunaklı hale getirildi
    * - V6.38: FONET düzeltilmiş kalsiyumu ayrı gösterilir; Ca replasmanı dCa ile değerlendirilir; Lab satırı kan alma günlerini listeler
    * - V6.37: replasman sırası FONET ile eşlendi; öneriler açılır kompakt listeye taşındı
@@ -6357,22 +6358,48 @@ ${consults || "-"}
     return aoeJoin([...locals, central, aoeU32(0x06054b50),aoeU16(0),aoeU16(0),aoeU16(centrals.length),aoeU16(centrals.length),aoeU32(central.length),aoeU32(offset),aoeU16(0)]);
   }
 
+  function aoeWordXmlColor(xml, color = "FF0000") {
+    const colorTag = '<w:color w:val="' + String(color || "FF0000").replace(/[^0-9A-F]/gi, "") + '"/>';
+    return String(xml || "").replace(/<w:r\b([^>]*)>([\s\S]*?)<\/w:r>/g, (run, attrs, inner) => {
+      if (/<w:rPr\b/.test(inner)) {
+        inner = inner.replace(/<w:rPr\b([^>]*)>([\s\S]*?)<\/w:rPr>/, (properties, propertyAttrs, content) => {
+          const colored = /<w:color\b/i.test(content)
+            ? content.replace(/<w:color\b[^>]*\/?\s*>/gi, colorTag)
+            : colorTag + content;
+          return '<w:rPr' + propertyAttrs + '>' + colored + '</w:rPr>';
+        });
+      } else inner = '<w:rPr>' + colorTag + '</w:rPr>' + inner;
+      return '<w:r' + attrs + '>' + inner + '</w:r>';
+    });
+  }
+
   function aoeDocxBytes() {
+    const sortedPatients = aoeSortedPatients();
+    const previousPatients = state.aoePreviousWordPatients || [];
+    const used = new Set();
+    let orderedPatients = "";
+    previousPatients.forEach((previous) => {
+      const matchIndex = sortedPatients.findIndex((patient, index) => !used.has(index) &&
+        (previous.keys || []).some((key) => aoePatientKeys(patient).includes(key))
+      );
+      if (previous.clinicXml) orderedPatients += previous.clinicXml;
+      if (matchIndex >= 0) {
+        orderedPatients += aoeWordPatient(sortedPatients[matchIndex]);
+        used.add(matchIndex);
+      } else orderedPatients += aoeWordXmlColor(previous.xml);
+    });
     let lastClinic = "";
-    const groupedPatients = aoeSortedPatients().map((p) => {
-      const key = aoeClinicKey(p);
-      const heading = key !== lastClinic
-        ? aoeWordParagraph(aoeClinicName(p).toLocaleUpperCase("tr-TR"), { size:12, bold:true, align:"center", before:80, after:120, keep:true })
-        : "";
+    sortedPatients.forEach((patient, index) => {
+      if (used.has(index)) return;
+      const key = aoeClinicKey(patient);
+      if (key !== lastClinic) orderedPatients += aoeWordParagraph(
+        aoeClinicName(patient).toLocaleUpperCase("tr-TR"),
+        { size:12, bold:true, align:"center", before:80, after:120, keep:true }
+      );
       lastClinic = key;
-      return heading + aoeWordPatient(p);
-    }).join("");
-    const missingPrevious = aoeMissingPreviousWordPatients();
-    const preservedPatients = missingPrevious.length
-      ? aoeWordParagraph("DOSYADA BULUNAN — AÇIK LİSTEDE OLMAYAN HASTALAR", { size:12, bold:true, align:"center", before:120, after:120, keep:true }) +
-        missingPrevious.map((p) => p.xml).join("")
-      : "";
-    const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) + groupedPatients + preservedPatients;
+      orderedPatients += aoeWordPatient(patient);
+    });
+    const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) + orderedPatients;
     const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
       '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>' + body +
       '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1843" w:right="1121" w:bottom="1535" w:left="1005" w:header="720" w:footer="0"/><w:cols w:num="2" w:space="720" w:sep="1"/></w:sectPr></w:body></w:document>';
@@ -6547,12 +6574,13 @@ ${consults || "-"}
   function aoePreviousWordPatients(documentXml) {
     const body = String(documentXml || "").match(/<w:body[^>]*>([\s\S]*?)<\/w:body>/)?.[1] || "";
     const blocks = body.match(/<w:p\b[\s\S]*?<\/w:p>|<w:tbl\b[\s\S]*?<\/w:tbl>/g) || [];
-    const result = []; let current = null;
+    const result = []; let current = null; let pendingClinicXml = "";
     const finish = () => {
       if (current?.name && current.blocks.length) result.push({
         name:current.name,
         keys:["ad:" + norm(current.name).replace(/[^a-z0-9çğıöşü]+/g, "")],
-        xml:current.blocks.join("")
+        xml:current.blocks.join(""),
+        clinicXml:current.clinicXml || ""
       });
       current = null;
     };
@@ -6567,13 +6595,16 @@ ${consults || "-"}
       const isClinicHeading = info.sizes.includes("24") && info.centered && info.text;
       if (joinedTitle) {
         finish();
-        current = { name:aoeNameFromPatientTitle(joinedTitle), blocks:[block, blocks[index + 1]] };
+        current = { name:aoeNameFromPatientTitle(joinedTitle), blocks:[block, blocks[index + 1]], clinicXml:pendingClinicXml };
+        pendingClinicXml = "";
         index += 1;
       } else if (isPatientTitle) {
         finish();
-        current = { name:aoeNameFromPatientTitle(info.text), blocks:[block] };
-      } else if (isClinicHeading && current) {
+        current = { name:aoeNameFromPatientTitle(info.text), blocks:[block], clinicXml:pendingClinicXml };
+        pendingClinicXml = "";
+      } else if (isClinicHeading) {
         finish();
+        pendingClinicXml = block;
       } else if (current) current.blocks.push(block);
     }
     finish();
