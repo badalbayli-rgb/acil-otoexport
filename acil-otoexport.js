@@ -38,7 +38,7 @@
    * - V6.42: yüklenen DOCX'teki elle düzenlenmiş sabit alanlar ve açık listede olmayan hasta blokları aynen korunur
    * - V6.43: kalsiyum/laboratuvar Ca ifadelerinin yanlışlıkla kanser hastalığı olarak işaretlenmesi engellendi
    * - V6.44: yüklenen DOCX'teki sabit alanlar boş olsalar da kilitlenir; Word satır sonları güvenilir okunur
- * - V6.46: yüklenen DOCX hasta sırası korunur; açık listede olmayan hastalar kendi yerinde kırmızı kalır
+ * - V6.47: DOCX satır sonları ile oda/ad eşleştirmesi güçlendirildi; aynı hastanın yanlışlıkla kırmızı olması önlendi
    * - V6.39: kompakt replasman satırlarında yazı, kolon, kontrast ve satır yüksekliği okunaklı hale getirildi
    * - V6.38: FONET düzeltilmiş kalsiyumu ayrı gösterilir; Ca replasmanı dCa ile değerlendirilir; Lab satırı kan alma günlerini listeler
    * - V6.37: replasman sırası FONET ile eşlendi; öneriler açılır kompakt listeye taşındı
@@ -5896,6 +5896,29 @@ ${consults || "-"}
     ].filter(Boolean);
   }
 
+  function aoeLooseIdentity(value) {
+    return norm(value)
+      .replace(/[ç]/g, "c").replace(/[ğ]/g, "g").replace(/[ıi]/g, "i")
+      .replace(/[ö]/g, "o").replace(/[ş]/g, "s").replace(/[ü]/g, "u")
+      .replace(/[^a-z0-9]+/g, "");
+  }
+
+  function aoeRoomIdentity(value) {
+    return clean(value).replace(/\D+/g, "").replace(/^0+/, "");
+  }
+
+  function aoePreviousMatchesPatient(previous, patient) {
+    const currentKeys = aoePatientKeys(patient);
+    if ((previous.keys || []).some((key) => currentKeys.includes(key))) return true;
+    const previousName = aoeLooseIdentity(previous.name || "");
+    const currentName = aoeLooseIdentity(patient.adSoyad || "");
+    if (previousName && currentName && previousName === currentName) return true;
+    const previousRoom = aoeRoomIdentity(previous.room || "");
+    const currentRoom = aoeRoomIdentity(patient.oda || "");
+    return !!(previousRoom && currentRoom && previousRoom === currentRoom && previousName && currentName &&
+      (previousName.includes(currentName) || currentName.includes(previousName)));
+  }
+
   function aoeLiveFixed(p) {
     const meta = extractCardMeta(p);
     const consultFacts = aoeConsultFacts(p);
@@ -6379,8 +6402,8 @@ ${consults || "-"}
     const used = new Set();
     let orderedPatients = "";
     previousPatients.forEach((previous) => {
-      const matchIndex = sortedPatients.findIndex((patient, index) => !used.has(index) &&
-        (previous.keys || []).some((key) => aoePatientKeys(patient).includes(key))
+      const matchIndex = sortedPatients.findIndex((patient, index) =>
+        !used.has(index) && aoePreviousMatchesPatient(previous, patient)
       );
       if (previous.clinicXml) orderedPatients += previous.clinicXml;
       if (matchIndex >= 0) {
@@ -6557,11 +6580,19 @@ ${consults || "-"}
         const namespaced = Array.from(doc.getElementsByTagNameNS?.("*", name) || []);
         return namespaced.length ? namespaced : Array.from(doc.getElementsByTagName("w:" + name));
       };
-      const text = byLocal("t").map((x) => x.textContent || "").join("").trim();
+      let text = "";
+      const walk = (node) => Array.from(node.childNodes || []).forEach((child) => {
+        const localName = child.localName || String(child.nodeName || "").split(":").pop();
+        if (localName === "t") text += child.textContent || "";
+        else if (localName === "br" || localName === "cr") text += "\n";
+        else walk(child);
+      });
+      walk(doc.documentElement);
+      text = text.trim();
       const sizes = byLocal("sz").map((x) => x.getAttribute("w:val") || x.getAttribute("val") || "");
       const centered = byLocal("jc").some((x) => (x.getAttribute("w:val") || x.getAttribute("val")) === "center");
-      return { text, sizes, centered };
-    } catch (e) { return { text:"", sizes:[], centered:false }; }
+      return { text, lines:text.split(/\n+/).map(clean).filter(Boolean), sizes, centered };
+    } catch (e) { return { text:"", lines:[], sizes:[], centered:false }; }
   }
 
   function aoeNameFromPatientTitle(title) {
@@ -6569,6 +6600,11 @@ ${consults || "-"}
     const lastIsAge = /^\d{1,3}[EK]?$/.test(parts[parts.length - 1] || "");
     const nameStart = parts.length >= 4 ? 2 : 1;
     return clean(parts.slice(nameStart, lastIsAge ? -1 : undefined).join("-"));
+  }
+
+  function aoeRoomFromPatientTitle(title) {
+    const parts = clean(title).split("-").map(clean).filter(Boolean);
+    return parts.length >= 4 ? clean(parts[1]) : "";
   }
 
   function aoePreviousWordPatients(documentXml) {
@@ -6584,23 +6620,25 @@ ${consults || "-"}
       });
       current = null;
     };
-    const infos = blocks.map((block) => block.startsWith("<w:p") ? aoeWordBlockInfo(block) : { text:"", sizes:[], centered:false });
+    const infos = blocks.map((block) => block.startsWith("<w:p") ? aoeWordBlockInfo(block) : { text:"", lines:[], sizes:[], centered:false });
     for (let index = 0; index < blocks.length; index += 1) {
       const block = blocks[index];
       const info = infos[index];
-      const joinedTitle = !aoeIsPatientTitleText(info.text) && /^[^-]+-\d+-/.test(info.text)
-        ? aoeCombinedPatientTitle(info.text, infos[index + 1]?.text)
+      const titleLine = (info.lines || []).find((line) => aoeIsPatientTitleText(line)) || info.text;
+      const nextTitleLine = (infos[index + 1]?.lines || []).find((line) => aoeIsPatientTitleText(line)) || infos[index + 1]?.text;
+      const joinedTitle = !aoeIsPatientTitleText(titleLine) && /^[^-]+-\d+-/.test(titleLine)
+        ? aoeCombinedPatientTitle(titleLine, nextTitleLine)
         : "";
-      const isPatientTitle = (info.sizes.includes("30") || aoeIsPatientTitleText(info.text)) && info.text && info.text !== "ACİL OTOEXPORT";
+      const isPatientTitle = (aoeIsPatientTitleText(titleLine) || (info.sizes.includes("30") && aoeIsPatientTitleText(titleLine))) && titleLine !== "ACİL OTOEXPORT";
       const isClinicHeading = info.sizes.includes("24") && info.centered && info.text;
       if (joinedTitle) {
         finish();
-        current = { name:aoeNameFromPatientTitle(joinedTitle), blocks:[block, blocks[index + 1]], clinicXml:pendingClinicXml };
+        current = { name:aoeNameFromPatientTitle(joinedTitle), room:aoeRoomFromPatientTitle(joinedTitle), blocks:[block, blocks[index + 1]], clinicXml:pendingClinicXml };
         pendingClinicXml = "";
         index += 1;
       } else if (isPatientTitle) {
         finish();
-        current = { name:aoeNameFromPatientTitle(info.text), blocks:[block], clinicXml:pendingClinicXml };
+        current = { name:aoeNameFromPatientTitle(titleLine), room:aoeRoomFromPatientTitle(titleLine), blocks:[block], clinicXml:pendingClinicXml };
         pendingClinicXml = "";
       } else if (isClinicHeading) {
         finish();
@@ -6612,9 +6650,8 @@ ${consults || "-"}
   }
 
   function aoeMissingPreviousWordPatients() {
-    const currentKeys = new Set((state.patients || []).flatMap((p) => aoePatientKeys(p)));
-    return (state.aoePreviousWordPatients || []).filter((p) =>
-      !(p.keys || []).some((key) => currentKeys.has(key))
+    return (state.aoePreviousWordPatients || []).filter((previous) =>
+      !(state.patients || []).some((patient) => aoePreviousMatchesPatient(previous, patient))
     );
   }
 
