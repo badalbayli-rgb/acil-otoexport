@@ -1,6 +1,6 @@
 (() => {
   /********************************************************************
-   * ACİL OTOEXPORT V6.47 HASTA EŞLEŞTİRME VE SIRA KORUMASI
+   * ACİL OTOEXPORT V6.48 KLİNİK VE ODA SIRASI KORUMASI
    * - Kullanıcı tek tek hasta açmadan açık servis hasta listesini toplar
    * - DOM tablo + ExtJS grid store okumayı dener
    * - Hastaları vizit kartı formatında aynı panelde gösterir
@@ -39,6 +39,7 @@
    * - V6.43: kalsiyum/laboratuvar Ca ifadelerinin yanlışlıkla kanser hastalığı olarak işaretlenmesi engellendi
    * - V6.44: yüklenen DOCX'teki sabit alanlar boş olsalar da kilitlenir; Word satır sonları güvenilir okunur
  * - V6.47: DOCX satır sonları ile oda/ad eşleştirmesi güçlendirildi; aynı hastanın yanlışlıkla kırmızı olması önlendi
+ * - V6.48: eski, yeni ve listede olmayan hastalar birlikte klinik 2-1-3-4 ve oda sırasına yerleştirilir
    * - V6.39: kompakt replasman satırlarında yazı, kolon, kontrast ve satır yüksekliği okunaklı hale getirildi
    * - V6.38: FONET düzeltilmiş kalsiyumu ayrı gösterilir; Ca replasmanı dCa ile değerlendirilir; Lab satırı kan alma günlerini listeler
    * - V6.37: replasman sırası FONET ile eşlendi; öneriler açılır kompakt listeye taşındı
@@ -5499,7 +5500,7 @@ ${consults || "-"}
     panel.innerHTML = `
       <header id="fsl-drag-handle" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;background:${t.header};color:${t.headerText};cursor:${state.popupMode ? "default" : "move"};user-select:none;border-bottom:1px solid ${t.border};">
         <div>
-          <b>ACİL OTOEXPORT V6.47 Hasta Eşleştirme ve Sıra Koruması</b>
+          <b>ACİL OTOEXPORT V6.48 Klinik ve Oda Sırası Koruması</b>
           <span id="fsl-status" style="margin-left:10px;color:#bfdbfe;">hazır</span>
           <span id="fsl-endpoints" style="margin-left:10px;color:${t.accent};font-size:12px;">arka plan sorgu hazır</span>
         </div>
@@ -6400,27 +6401,42 @@ ${consults || "-"}
     const sortedPatients = aoeSortedPatients();
     const previousPatients = state.aoePreviousWordPatients || [];
     const used = new Set();
-    let orderedPatients = "";
-    previousPatients.forEach((previous) => {
+    const entries = [];
+    previousPatients.forEach((previous, previousIndex) => {
       const matchIndex = sortedPatients.findIndex((patient, index) =>
         !used.has(index) && aoePreviousMatchesPatient(previous, patient)
       );
-      if (previous.clinicXml) orderedPatients += previous.clinicXml;
       if (matchIndex >= 0) {
-        orderedPatients += aoeWordPatient(sortedPatients[matchIndex]);
+        const patient = sortedPatients[matchIndex];
+        entries.push({ patient, clinic:aoeClinicName(patient), room:clean(patient.oda || ""), previousIndex, missing:false });
         used.add(matchIndex);
-      } else orderedPatients += aoeWordXmlColor(previous.xml);
+      } else entries.push({ previous, clinic:clean(previous.clinicName || "DİĞER KLİNİKLER"), room:clean(previous.room || ""), previousIndex, missing:true });
     });
-    let lastClinic = "";
     sortedPatients.forEach((patient, index) => {
       if (used.has(index)) return;
-      const key = aoeClinicKey(patient);
+      entries.push({ patient, clinic:aoeClinicName(patient), room:clean(patient.oda || ""), previousIndex:previousPatients.length + index, missing:false });
+    });
+    const configuredOrder = new Map(aoeEffectiveClinicOrder().map((name, index) => [norm(name), index]));
+    entries.sort((a, b) => {
+      const priority = aoeClinicPriority(a.clinic) - aoeClinicPriority(b.clinic);
+      if (priority) return priority;
+      const configured = (configuredOrder.get(norm(a.clinic)) ?? 999) - (configuredOrder.get(norm(b.clinic)) ?? 999);
+      if (configured) return configured;
+      const clinic = clean(a.clinic).localeCompare(clean(b.clinic), "tr", { sensitivity:"base", numeric:true });
+      if (clinic) return clinic;
+      const room = clean(a.room).localeCompare(clean(b.room), "tr", { sensitivity:"base", numeric:true });
+      if (room) return room;
+      return a.previousIndex - b.previousIndex;
+    });
+    let orderedPatients = ""; let lastClinic = "";
+    entries.forEach((entry) => {
+      const key = norm(entry.clinic);
       if (key !== lastClinic) orderedPatients += aoeWordParagraph(
-        aoeClinicName(patient).toLocaleUpperCase("tr-TR"),
+        clean(entry.clinic || "DİĞER KLİNİKLER").toLocaleUpperCase("tr-TR"),
         { size:12, bold:true, align:"center", before:80, after:120, keep:true }
       );
       lastClinic = key;
-      orderedPatients += aoeWordPatient(patient);
+      orderedPatients += entry.missing ? aoeWordXmlColor(entry.previous.xml) : aoeWordPatient(entry.patient);
     });
     const body = aoeWordParagraph("ACİL OTOEXPORT", { size:17, bold:true, after:120 }) + orderedPatients;
     const documentXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
@@ -6610,13 +6626,14 @@ ${consults || "-"}
   function aoePreviousWordPatients(documentXml) {
     const body = String(documentXml || "").match(/<w:body[^>]*>([\s\S]*?)<\/w:body>/)?.[1] || "";
     const blocks = body.match(/<w:p\b[\s\S]*?<\/w:p>|<w:tbl\b[\s\S]*?<\/w:tbl>/g) || [];
-    const result = []; let current = null; let pendingClinicXml = "";
+    const result = []; let current = null; let pendingClinicXml = ""; let activeClinicName = "";
     const finish = () => {
       if (current?.name && current.blocks.length) result.push({
         name:current.name,
         keys:["ad:" + norm(current.name).replace(/[^a-z0-9çğıöşü]+/g, "")],
         xml:current.blocks.join(""),
-        clinicXml:current.clinicXml || ""
+        clinicXml:current.clinicXml || "",
+        clinicName:current.clinicName || ""
       });
       current = null;
     };
@@ -6633,16 +6650,17 @@ ${consults || "-"}
       const isClinicHeading = info.sizes.includes("24") && info.centered && info.text;
       if (joinedTitle) {
         finish();
-        current = { name:aoeNameFromPatientTitle(joinedTitle), room:aoeRoomFromPatientTitle(joinedTitle), blocks:[block, blocks[index + 1]], clinicXml:pendingClinicXml };
+        current = { name:aoeNameFromPatientTitle(joinedTitle), room:aoeRoomFromPatientTitle(joinedTitle), blocks:[block, blocks[index + 1]], clinicXml:pendingClinicXml, clinicName:activeClinicName };
         pendingClinicXml = "";
         index += 1;
       } else if (isPatientTitle) {
         finish();
-        current = { name:aoeNameFromPatientTitle(titleLine), room:aoeRoomFromPatientTitle(titleLine), blocks:[block], clinicXml:pendingClinicXml };
+        current = { name:aoeNameFromPatientTitle(titleLine), room:aoeRoomFromPatientTitle(titleLine), blocks:[block], clinicXml:pendingClinicXml, clinicName:activeClinicName };
         pendingClinicXml = "";
       } else if (isClinicHeading) {
         finish();
         pendingClinicXml = block;
+        activeClinicName = clean(info.text);
       } else if (current) current.blocks.push(block);
     }
     finish();
