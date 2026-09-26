@@ -36,6 +36,7 @@
    * - V6.40: replasman satırlarının ekrana sığdırılmak için ezilmesi kaldırıldı; sabit okunaklı satırlar ve dikey kaydırma eklendi
    * - V6.41: vizit çıktısında sistem tanısı korunur ve OP alanına gerçekleşen ameliyatın adı yazılır
    * - V6.42: yüklenen DOCX'teki elle düzenlenmiş sabit alanlar ve açık listede olmayan hasta blokları aynen korunur
+   * - V6.43: kalsiyum/laboratuvar Ca ifadelerinin yanlışlıkla kanser hastalığı olarak işaretlenmesi engellendi
    * - V6.39: kompakt replasman satırlarında yazı, kolon, kontrast ve satır yüksekliği okunaklı hale getirildi
    * - V6.38: FONET düzeltilmiş kalsiyumu ayrı gösterilir; Ca replasmanı dCa ile değerlendirilir; Lab satırı kan alma günlerini listeler
    * - V6.37: replasman sırası FONET ile eşlendi; öneriler açılır kompakt listeye taşındı
@@ -2493,6 +2494,10 @@
     ].filter(Boolean).join("\n");
   }
 
+  function aoeHasCancerEvidence(text) {
+    return /malignite|kanser|karsinom|adenokarsinom|neoplazm|t[üu]m[öo]r|lenfoma|l[öo]semi|\b(?:mide|kolon|rektum|pankreas|meme|akci[ğg]er|karaci[ğg]er|prostat|over|endometrium|serviks|tiroid|[öo]zofagus|mesane|b[öo]brek|koledok|safra\s+yolu)\s+ca\b/i.test(String(text || ""));
+  }
+
   function extractKnownDiseases(p) {
     const direct = clean(p.knownDiseases || p.anesthesia?.knownDiseases || "");
     if (direct) return clip(direct, 80);
@@ -2509,7 +2514,7 @@
       ["KBY", /\bKBY\b|kronik b[öo]brek/i],
       ["AF", /\bAF\b|atriyal fibrilasyon/i],
       ["SVO", /\bSVO\b|inme|serebrovask/i],
-      ["CA", /\bCA\b|malignite|kanser/i]
+      ["CA", { test:aoeHasCancerEvidence }]
     ];
     map.forEach(([label, re]) => {
       if (re.test(text) && !found.includes(label)) found.push(label);
@@ -5916,7 +5921,11 @@ ${consults || "-"}
         const live = aoeLiveFixed(p);
         const saved = map[key];
         const locked = Object.fromEntries(Object.entries(saved).filter(([, value]) => clean(value || "")));
-        return { ...live, ...locked };
+        const merged = { ...live, ...locked };
+        if (/\bCA\b/i.test(merged.bh || "") && !aoeHasCancerEvidence(patientFreeText(p))) {
+          merged.bh = clean(String(merged.bh).replace(/\bCA\b/gi, "").replace(/\s*[,;+\/]\s*$/g, "").replace(/^\s*[,;+\/]\s*/g, "").replace(/\s*[,;+\/]\s*[,;+\/]\s*/g, ", "));
+        }
+        return merged;
       }
     }
     return aoeLiveFixed(p);
