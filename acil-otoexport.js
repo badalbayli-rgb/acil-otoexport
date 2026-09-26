@@ -37,6 +37,7 @@
    * - V6.41: vizit çıktısında sistem tanısı korunur ve OP alanına gerçekleşen ameliyatın adı yazılır
    * - V6.42: yüklenen DOCX'teki elle düzenlenmiş sabit alanlar ve açık listede olmayan hasta blokları aynen korunur
    * - V6.43: kalsiyum/laboratuvar Ca ifadelerinin yanlışlıkla kanser hastalığı olarak işaretlenmesi engellendi
+   * - V6.44: yüklenen DOCX'teki sabit alanlar boş olsalar da kilitlenir; Word satır sonları güvenilir okunur
    * - V6.39: kompakt replasman satırlarında yazı, kolon, kontrast ve satır yüksekliği okunaklı hale getirildi
    * - V6.38: FONET düzeltilmiş kalsiyumu ayrı gösterilir; Ca replasmanı dCa ile değerlendirilir; Lab satırı kan alma günlerini listeler
    * - V6.37: replasman sırası FONET ile eşlendi; öneriler açılır kompakt listeye taşındı
@@ -5920,7 +5921,10 @@ ${consults || "-"}
       if (map[key]) {
         const live = aoeLiveFixed(p);
         const saved = map[key];
-        const locked = Object.fromEntries(Object.entries(saved).filter(([, value]) => clean(value || "")));
+        const locked = {};
+        ["name", "diagnosis", "operation", "plan", "admission", "surgeryDate", "bh", "ki", "go"].forEach((field) => {
+          if (Object.prototype.hasOwnProperty.call(saved, field)) locked[field] = clean(saved[field] || "");
+        });
         const merged = { ...live, ...locked };
         if (/\bCA\b/i.test(merged.bh || "") && !aoeHasCancerEvidence(patientFreeText(p))) {
           merged.bh = clean(String(merged.bh).replace(/\bCA\b/gi, "").replace(/\s*[,;+\/]\s*$/g, "").replace(/^\s*[,;+\/]\s*/g, "").replace(/\s*[,;+\/]\s*[,;+\/]\s*/g, ", "));
@@ -6434,17 +6438,59 @@ ${consults || "-"}
     return parts.length >= 4 && /^\d{1,3}[EK]?$/.test(parts[parts.length - 1] || "");
   }
 
+  function aoeCombinedPatientTitle(first, second) {
+    const joined = clean([first, second].filter(Boolean).join(" "));
+    return aoeIsPatientTitleText(joined) ? joined : "";
+  }
+
   function aoeLegacyManifest(documentXml) {
     const doc = new DOMParser().parseFromString(documentXml || "", "application/xml");
-    const paragraphs = Array.from(doc.getElementsByTagName("w:p")).map((node) => {
-      const text = Array.from(node.getElementsByTagName("w:t")).map((x) => x.textContent || "").join("").trim();
-      const sizes = Array.from(node.getElementsByTagName("w:sz")).map((x) => x.getAttribute("w:val") || x.getAttribute("val") || "");
-      return { text, isPatientTitle:sizes.includes("30") || aoeIsPatientTitleText(text) };
+    const nodesByLocalName = (node, localName) => {
+      const namespaced = Array.from(node.getElementsByTagNameNS?.("*", localName) || []);
+      return namespaced.length ? namespaced : Array.from(node.getElementsByTagName("w:" + localName));
+    };
+    const paragraphNodes = nodesByLocalName(doc, "p");
+    const rawParagraphs = paragraphNodes.flatMap((node) => {
+      let text = "";
+      const walk = (part) => {
+        Array.from(part.childNodes || []).forEach((child) => {
+          const localName = child.localName || String(child.nodeName || "").split(":").pop();
+          if (localName === "t") text += child.textContent || "";
+          else if (localName === "br" || localName === "cr") text += "\n";
+          else walk(child);
+        });
+      };
+      walk(node);
+      const sizes = nodesByLocalName(node, "sz").map((x) => x.getAttribute("w:val") || x.getAttribute("val") || "");
+      const lines = text.split(/\n+/).map(clean).filter(Boolean);
+      const grouped = [];
+      lines.forEach((line) => {
+        const previous = grouped[grouped.length - 1];
+        const previousField = previous?.text.match(/^(TANI|OP|BH|K[İI]|GO)\s*:/i)?.[1] || "";
+        const startsAnotherField = /^[^:]{1,24}:/.test(line);
+        if (previousField && !startsAnotherField && !aoeIsPatientTitleText(line)) previous.text = clean(previous.text + " " + line);
+        else grouped.push({
+          text:line,
+          isPatientTitle:aoeIsPatientTitleText(line) || (sizes.includes("30") && (line.match(/-/g) || []).length >= 2)
+        });
+      });
+      return grouped;
     });
+    const paragraphs = [];
+    for (let index = 0; index < rawParagraphs.length; index += 1) {
+      const paragraph = rawParagraphs[index];
+      const combined = !paragraph.isPatientTitle && /^[^-]+-\d+-/.test(paragraph.text)
+        ? aoeCombinedPatientTitle(paragraph.text, rawParagraphs[index + 1]?.text)
+        : "";
+      if (combined) {
+        paragraphs.push({ text:combined, isPatientTitle:true });
+        index += 1;
+      } else paragraphs.push(paragraph);
+    }
     const patients = [];
     let current = null;
     const assign = (label, value) => {
-      if (!current || !value) return;
+      if (!current) return;
       const map = {
         "TANI":"diagnosis", "OP":"operation", "PLAN":"plan",
         "YATIŞ TARİHİ":"admission", "YATIS TARİHİ":"admission", "YATIS TARIHI":"admission",
@@ -6452,7 +6498,7 @@ ${consults || "-"}
         "BH":"bh", "Kİ":"ki", "KI":"ki", "GO":"go"
       };
       const field = map[label.toLocaleUpperCase("tr-TR")];
-      if (field && !current[field]) current[field] = clean(value);
+      if (field && !Object.prototype.hasOwnProperty.call(current, field)) current[field] = clean(value || "");
     };
     paragraphs.forEach((paragraph) => {
       if (paragraph.isPatientTitle && paragraph.text && paragraph.text !== "ACİL OTOEXPORT") {
@@ -6480,9 +6526,13 @@ ${consults || "-"}
         '<root xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' + xml + '</root>',
         "application/xml"
       );
-      const text = Array.from(doc.getElementsByTagName("w:t")).map((x) => x.textContent || "").join("").trim();
-      const sizes = Array.from(doc.getElementsByTagName("w:sz")).map((x) => x.getAttribute("w:val") || x.getAttribute("val") || "");
-      const centered = Array.from(doc.getElementsByTagName("w:jc")).some((x) => (x.getAttribute("w:val") || x.getAttribute("val")) === "center");
+      const byLocal = (name) => {
+        const namespaced = Array.from(doc.getElementsByTagNameNS?.("*", name) || []);
+        return namespaced.length ? namespaced : Array.from(doc.getElementsByTagName("w:" + name));
+      };
+      const text = byLocal("t").map((x) => x.textContent || "").join("").trim();
+      const sizes = byLocal("sz").map((x) => x.getAttribute("w:val") || x.getAttribute("val") || "");
+      const centered = byLocal("jc").some((x) => (x.getAttribute("w:val") || x.getAttribute("val")) === "center");
       return { text, sizes, centered };
     } catch (e) { return { text:"", sizes:[], centered:false }; }
   }
@@ -6506,17 +6556,26 @@ ${consults || "-"}
       });
       current = null;
     };
-    blocks.forEach((block) => {
-      const info = block.startsWith("<w:p") ? aoeWordBlockInfo(block) : { text:"", sizes:[], centered:false };
+    const infos = blocks.map((block) => block.startsWith("<w:p") ? aoeWordBlockInfo(block) : { text:"", sizes:[], centered:false });
+    for (let index = 0; index < blocks.length; index += 1) {
+      const block = blocks[index];
+      const info = infos[index];
+      const joinedTitle = !aoeIsPatientTitleText(info.text) && /^[^-]+-\d+-/.test(info.text)
+        ? aoeCombinedPatientTitle(info.text, infos[index + 1]?.text)
+        : "";
       const isPatientTitle = (info.sizes.includes("30") || aoeIsPatientTitleText(info.text)) && info.text && info.text !== "ACİL OTOEXPORT";
       const isClinicHeading = info.sizes.includes("24") && info.centered && info.text;
-      if (isPatientTitle) {
+      if (joinedTitle) {
+        finish();
+        current = { name:aoeNameFromPatientTitle(joinedTitle), blocks:[block, blocks[index + 1]] };
+        index += 1;
+      } else if (isPatientTitle) {
         finish();
         current = { name:aoeNameFromPatientTitle(info.text), blocks:[block] };
       } else if (isClinicHeading && current) {
         finish();
       } else if (current) current.blocks.push(block);
-    });
+    }
     finish();
     return result.filter((p) => p.keys[0] !== "ad:");
   }
@@ -6565,9 +6624,10 @@ ${consults || "-"}
           return;
         }
         const existing = mergedPatients[existingIndex];
-        const visibleEdits = Object.fromEntries(
-          Object.entries(patient).filter(([field, value]) => field !== "keys" && clean(value || ""))
-        );
+        const visibleEdits = {};
+        ["name", "diagnosis", "operation", "plan", "admission", "surgeryDate", "bh", "ki", "go"].forEach((field) => {
+          if (Object.prototype.hasOwnProperty.call(patient, field)) visibleEdits[field] = clean(patient[field] || "");
+        });
         mergedPatients[existingIndex] = {
           ...existing,
           ...visibleEdits,
