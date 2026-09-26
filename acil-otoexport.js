@@ -34,6 +34,7 @@
    * - V6.24: Ca yalnız gerçek Kalsiyum (Ca) sonuçlarını kullanır; hesaplama açıklamaları dışlanır
    * - V6.25: hasta arama çubuğu, optimize bildirim şeridi, Google Docs uyumlu son 8 kan tablosu ve son vital vizit çıktısı
    * - V6.40: replasman satırlarının ekrana sığdırılmak için ezilmesi kaldırıldı; sabit okunaklı satırlar ve dikey kaydırma eklendi
+   * - V6.41: vizit çıktısında sistem tanısı korunur ve OP alanına gerçekleşen ameliyatın adı yazılır
    * - V6.39: kompakt replasman satırlarında yazı, kolon, kontrast ve satır yüksekliği okunaklı hale getirildi
    * - V6.38: FONET düzeltilmiş kalsiyumu ayrı gösterilir; Ca replasmanı dCa ile değerlendirilir; Lab satırı kan alma günlerini listeler
    * - V6.37: replasman sırası FONET ile eşlendi; öneriler açılır kompakt listeye taşındı
@@ -3238,6 +3239,74 @@ ${consults || "-"}
     `;
   }
 
+  function aoeObjectName(value) {
+    if (value == null) return "";
+    if (typeof value === "string" || typeof value === "number") return clean(value);
+    return clean(
+      value.koduAdi || value.kodAdi || value.adi || value.ad || value.aciklama ||
+      value.taniAdi || value.ameliyatAdi || value.islemAdi || ""
+    );
+  }
+
+  function aoeDiagnosisFromLists(...lists) {
+    const found = [];
+    lists.flatMap((list) => Array.isArray(list) ? list : []).forEach((row) => {
+      const value = aoeObjectName(row?.tani) || aoeObjectName(row?.hastaTani) || aoeObjectName(row);
+      if (value && !found.some((item) => norm(item) === norm(value))) found.push(value);
+    });
+    return found.slice(0, 4).join(", ");
+  }
+
+  function aoeDiagnosisFromPayload(...roots) {
+    const found = [];
+    const seen = new Set();
+    const add = (value) => {
+      const name = aoeObjectName(value);
+      if (name && !found.some((item) => norm(item) === norm(name))) found.push(name);
+    };
+    const walk = (value, depth = 0, parentKey = "") => {
+      if (value == null || depth > 5 || found.length >= 4) return;
+      if (typeof value !== "object") {
+        if (/tani|diagnos/.test(searchNorm(parentKey))) add(value);
+        return;
+      }
+      if (seen.has(value)) return;
+      seen.add(value);
+      if (/tani|diagnos/.test(searchNorm(parentKey))) add(value);
+      if (Array.isArray(value)) value.forEach((item) => walk(item, depth + 1, parentKey));
+      else Object.entries(value).forEach(([key, item]) => {
+        if (/tani|diagnos/.test(searchNorm(key))) add(item);
+        walk(item, depth + 1, key);
+      });
+    };
+    roots.forEach((root) => walk(root));
+    return found.slice(0, 4).join(", ");
+  }
+
+  function aoeSurgeryCodeName(row = {}) {
+    const candidates = [
+      row.ameliyatKodu, row.ameliyatKod, row.ameliyatKodu1, row.ameliyatKod1,
+      row.ameliyat1, row.ameliyat, row.ameliyatAdi, row.ameliyatKoduAdi,
+      row.ameliyatKodAdi, row.koduAdi, row.kodAdi, row.islem, row.islemAdi,
+      row.hizmet, row.hizmetAdi
+    ].map(aoeObjectName).filter((value) => value && value !== "[object Object]");
+    const seen = new Set();
+    const walk = (value, depth = 0, parentKey = "") => {
+      if (value == null || depth > 4 || typeof value !== "object" || seen.has(value)) return;
+      seen.add(value);
+      Object.entries(value).forEach(([key, item]) => {
+        const normalizedKey = searchNorm(key).replace(/\s+/g, "");
+        if (/ameliyat.*kod|kod.*ameliyat|ameliyat1|ameliyatadi|islem.*kod/.test(normalizedKey)) {
+          const name = aoeObjectName(item);
+          if (name && name !== "[object Object]") candidates.push(name);
+        }
+        walk(item, depth + 1, key || parentKey);
+      });
+    };
+    walk(row);
+    return candidates.find((value) => /[A-Za-zÇĞİÖŞÜçğıöşü]{3}/.test(value)) || candidates[0] || "";
+  }
+
   function parseKlinikDetail(data, p) {
     const d = data?.data || {};
     const sevk = d.birimSevk || {};
@@ -3256,11 +3325,13 @@ ${consults || "-"}
     p.yatis = p.yatis || d.klinik?.yatisTarihi || sevk.sevkTarihi || "";
     p.alerji = p.alerji || extractAllergyInfo(d);
     setDietInfo(p, d);
-    p.tani = (d.taniList || d.nakilTaniList || [])
-      .map((x) => x?.tani?.koduAdi || x?.tani?.adi)
-      .filter(Boolean)
-      .slice(0, 4)
-      .join(", ");
+    const detailDiagnosis = aoeDiagnosisFromLists(
+      d.taniList, d.nakilTaniList, d.hastaTaniList,
+      sevk.taniList, sevk.hastaTaniList,
+      gelis.taniList, gelis.hastaTaniList,
+      hasta.taniList, hasta.hastaTaniList
+    ) || aoeDiagnosisFromPayload(d, sevk, gelis, hasta);
+    p.tani = detailDiagnosis || p.tani || "";
     const izlem = d.klinikIzlemList || [];
     p.clinical = izlem[0]?.klinikIzlem || p.clinical || "";
     p.clinicalHistory = izlem.map((x) => ({
@@ -3287,11 +3358,12 @@ ${consults || "-"}
     p.yatis = p.yatis || sevk.sevkTarihi || gelis.muracaatTarihi || "";
     p.alerji = p.alerji || extractAllergyInfo(root);
     setDietInfo(p, root);
-    p.tani = p.tani || (root.hastaTaniList || [])
-      .map((x) => x?.tani?.koduAdi || x?.tani?.adi)
-      .filter(Boolean)
-      .slice(0, 4)
-      .join(", ");
+    p.tani = p.tani || aoeDiagnosisFromLists(
+      root.hastaTaniList, root.taniList, root.nakilTaniList,
+      sevk.hastaTaniList, sevk.taniList,
+      gelis.hastaTaniList, gelis.taniList,
+      hasta.hastaTaniList, hasta.taniList
+    ) || aoeDiagnosisFromPayload(root, sevk, gelis, hasta);
   }
 
   async function fetchSevkInfo(p) {
@@ -3324,7 +3396,8 @@ ${consults || "-"}
     p.surgeries = (data.data || [])
       .map((x) => ({
         id: x.id,
-        name: x.ameliyat1 || x.ameliyat || x.ameliyatAdi || "",
+        name: aoeSurgeryCodeName(x),
+        code: aoeObjectName(x.ameliyatKodu || x.ameliyatKod || x.ameliyatKodu1 || x.ameliyatKod1),
         requestDate: x.istekTarihi || "",
         startDate: x.baslangicTarihi || "",
         endDate: x.bitisTarihi || "",
@@ -5697,14 +5770,17 @@ ${consults || "-"}
 
   function aoeSurgeryInfo(p) {
     const surgeries = (p.surgeries || []).filter((x) => surgeryDateMs(x));
-    if (!surgeries.length) return { date:"", badge:operationBadge(p) || "" };
+    if (!surgeries.length) return { date:"", badge:operationBadge(p) || "", operation:"" };
     const now = Date.now();
     const past = surgeries.filter((x) => surgeryDateMs(x) <= now).sort((a,b) => surgeryDateMs(b) - surgeryDateMs(a));
     const future = surgeries.filter((x) => surgeryDateMs(x) > now).sort((a,b) => surgeryDateMs(a) - surgeryDateMs(b));
     const selected = past[0] || future[0];
+    const performed = past.find((x) => clean(x.name || "") && (x.startDate || x.endDate)) ||
+      past.find((x) => clean(x.name || "")) || null;
     return {
       date: aoeDate(selected.startDate || selected.baslangicTarihi || selected.endDate || selected.bitisTarihi || selected.requestDate || selected.istekTarihi),
-      badge: operationBadge(p) || ""
+      badge: operationBadge(p) || "",
+      operation: clean(performed?.name || "")
     };
   }
 
@@ -5816,10 +5892,13 @@ ${consults || "-"}
     const meta = extractCardMeta(p);
     const consultFacts = aoeConsultFacts(p);
     const surgery = aoeSurgeryInfo(p);
+    const postopOperation = /^POSTOP/i.test(clean(surgery.badge || ""))
+      ? clean(meta.go || p.plannedOperation || consultFacts.go || "")
+      : "";
     return {
       name: clean(p.adSoyad || ""),
-      diagnosis: clean(consultFacts.diagnosis || ""),
-      operation: clean(meta.go || p.plannedOperation || consultFacts.go || ""),
+      diagnosis: clean(consultFacts.diagnosis || p.tani || ""),
+      operation: clean(surgery.operation || postopOperation || ""),
       plan: clean(p.plan || ""),
       admission: aoeDate(p.yatis || ""),
       surgeryDate: clean(surgery.date || ""),
@@ -5832,7 +5911,12 @@ ${consults || "-"}
   function aoeFixedFor(p) {
     const map = state.aoePreviousFixed || {};
     for (const key of aoePatientKeys(p)) {
-      if (map[key]) return { ...aoeLiveFixed(p), ...map[key] };
+      if (map[key]) {
+        const live = aoeLiveFixed(p);
+        const saved = map[key];
+        const locked = Object.fromEntries(Object.entries(saved).filter(([, value]) => clean(value || "")));
+        return { ...live, ...locked };
+      }
     }
     return aoeLiveFixed(p);
   }
