@@ -1,6 +1,6 @@
 (() => {
   /********************************************************************
-   * ACİL OTOEXPORT V6.40 DİKEY KAYDIRMALI REPLASMAN
+   * ACİL OTOEXPORT V6.47 HASTA EŞLEŞTİRME VE SIRA KORUMASI
    * - Kullanıcı tek tek hasta açmadan açık servis hasta listesini toplar
    * - DOM tablo + ExtJS grid store okumayı dener
    * - Hastaları vizit kartı formatında aynı panelde gösterir
@@ -5499,7 +5499,7 @@ ${consults || "-"}
     panel.innerHTML = `
       <header id="fsl-drag-handle" style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:12px;background:${t.header};color:${t.headerText};cursor:${state.popupMode ? "default" : "move"};user-select:none;border-bottom:1px solid ${t.border};">
         <div>
-          <b>FONET Servis Canlı Panel V6.40 Dikey Kaydırmalı Replasman</b>
+          <b>ACİL OTOEXPORT V6.47 Hasta Eşleştirme ve Sıra Koruması</b>
           <span id="fsl-status" style="margin-left:10px;color:#bfdbfe;">hazır</span>
           <span id="fsl-endpoints" style="margin-left:10px;color:${t.accent};font-size:12px;">arka plan sorgu hazır</span>
         </div>
