@@ -35,6 +35,7 @@
    * - V6.25: hasta arama çubuğu, optimize bildirim şeridi, Google Docs uyumlu son 8 kan tablosu ve son vital vizit çıktısı
    * - V6.40: replasman satırlarının ekrana sığdırılmak için ezilmesi kaldırıldı; sabit okunaklı satırlar ve dikey kaydırma eklendi
    * - V6.41: vizit çıktısında sistem tanısı korunur ve OP alanına gerçekleşen ameliyatın adı yazılır
+   * - V6.42: yüklenen DOCX'teki elle düzenlenmiş sabit alanlar ve açık listede olmayan hasta blokları aynen korunur
    * - V6.39: kompakt replasman satırlarında yazı, kolon, kontrast ve satır yüksekliği okunaklı hale getirildi
    * - V6.38: FONET düzeltilmiş kalsiyumu ayrı gösterilir; Ca replasmanı dCa ile değerlendirilir; Lab satırı kan alma günlerini listeler
    * - V6.37: replasman sırası FONET ile eşlendi; öneriler açılır kompakt listeye taşındı
@@ -6419,12 +6420,17 @@ ${consults || "-"}
     return entries;
   }
 
+  function aoeIsPatientTitleText(text) {
+    const parts = clean(text).split("-").map(clean).filter(Boolean);
+    return parts.length >= 4 && /^\d{1,3}[EK]?$/.test(parts[parts.length - 1] || "");
+  }
+
   function aoeLegacyManifest(documentXml) {
     const doc = new DOMParser().parseFromString(documentXml || "", "application/xml");
     const paragraphs = Array.from(doc.getElementsByTagName("w:p")).map((node) => {
       const text = Array.from(node.getElementsByTagName("w:t")).map((x) => x.textContent || "").join("").trim();
       const sizes = Array.from(node.getElementsByTagName("w:sz")).map((x) => x.getAttribute("w:val") || x.getAttribute("val") || "");
-      return { text, isPatientTitle: sizes.includes("30") };
+      return { text, isPatientTitle:sizes.includes("30") || aoeIsPatientTitleText(text) };
     });
     const patients = [];
     let current = null;
@@ -6443,7 +6449,7 @@ ${consults || "-"}
       if (paragraph.isPatientTitle && paragraph.text && paragraph.text !== "ACİL OTOEXPORT") {
         if (current) patients.push(current);
         const parts = paragraph.text.split("-").map(clean).filter(Boolean);
-        const lastIsAge = /^\d{1,3}$/.test(parts[parts.length - 1] || "");
+        const lastIsAge = /^\d{1,3}[EK]?$/.test(parts[parts.length - 1] || "");
         const nameStart = parts.length >= 4 ? 2 : 1;
         const nameParts = parts.slice(nameStart, lastIsAge ? -1 : undefined);
         const name = clean(nameParts.join("-"));
@@ -6493,7 +6499,7 @@ ${consults || "-"}
     };
     blocks.forEach((block) => {
       const info = block.startsWith("<w:p") ? aoeWordBlockInfo(block) : { text:"", sizes:[], centered:false };
-      const isPatientTitle = info.sizes.includes("30") && info.text && info.text !== "ACİL OTOEXPORT";
+      const isPatientTitle = (info.sizes.includes("30") || aoeIsPatientTitleText(info.text)) && info.text && info.text !== "ACİL OTOEXPORT";
       const isClinicHeading = info.sizes.includes("24") && info.centered && info.text;
       if (isPatientTitle) {
         finish();
@@ -6542,7 +6548,22 @@ ${consults || "-"}
       const legacy = aoeLegacyManifest(documentXml);
       const mergedPatients = [...(payload.patients || [])];
       (legacy.patients || []).forEach((patient) => {
-        if (!(patient.keys || []).some((key) => mergedPatients.some((old) => (old.keys || []).includes(key)))) mergedPatients.push(patient);
+        const existingIndex = mergedPatients.findIndex((old) =>
+          (patient.keys || []).some((key) => (old.keys || []).includes(key))
+        );
+        if (existingIndex < 0) {
+          mergedPatients.push(patient);
+          return;
+        }
+        const existing = mergedPatients[existingIndex];
+        const visibleEdits = Object.fromEntries(
+          Object.entries(patient).filter(([field, value]) => field !== "keys" && clean(value || ""))
+        );
+        mergedPatients[existingIndex] = {
+          ...existing,
+          ...visibleEdits,
+          keys:[...new Set([...(existing.keys || []), ...(patient.keys || [])])]
+        };
       });
       payload.patients = mergedPatients;
       const map = {};
