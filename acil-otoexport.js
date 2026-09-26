@@ -2023,6 +2023,7 @@
   function summarizeLabs(details) {
     const wanted = {};
     const glucoseChecks = [];
+    const cultures = [];
     const labSourceText = (row) => clean([
       row?.tupAdi,
       row?.grupAdi,
@@ -2132,12 +2133,21 @@
 
     for (const row of details || []) {
       const test = row?.lisHastaTupTetkik?.tetkik?.adi || row?.tetkik?.adi || "";
-      const key = normalizeLabName(test);
-      if (!key) continue;
       const value = row?.lisHastaTupTetkik?.sonucByRapor || row?.sonucByRapor || row?.sonuc || "";
       const resultDate = row?.lisHastaTupTetkik?.sonucTarihi || row?.lisHastaTupTetkik?.onayTarihi || row?.sonucTarihi || row?.onayTarihi || "";
       const date = collectionDate(row, resultDate);
       const source = labSourceText(row);
+      if (isCulture(source + " " + test)) {
+        const hay = searchNorm(source + " " + test);
+        const name = /doku|tissue/.test(hay) ? "Doku kültürü"
+          : /kan|blood/.test(hay) ? "Kan kültürü"
+          : /yara|wound/.test(hay) ? "Yara kültürü"
+          : (clean(test) || "Kültür");
+        const item = { name, date:date || resultDate || "" };
+        if (!cultures.some((x) => norm(x.name) === norm(item.name) && shortDate(x.date) === shortDate(item.date))) cultures.push(item);
+      }
+      const key = normalizeLabName(test);
+      if (!key) continue;
       add(key, value, date, source);
 
       for (const old of row?.oncekiSonucList || []) {
@@ -2175,7 +2185,8 @@
     }
 
     glucoseChecks.sort((a, b) => String(b.sortKey || "").localeCompare(String(a.sortKey || "")));
-    return { labs: wanted, glucoseChecks: glucoseChecks.slice(0, 12) };
+    cultures.sort((a, b) => String(dateTimeKey(b.date)).localeCompare(String(dateTimeKey(a.date))));
+    return { labs: wanted, glucoseChecks: glucoseChecks.slice(0, 12), cultures };
   }
 
   function labLine(labs) {
@@ -3971,6 +3982,7 @@ ${consults || "-"}
     } else if (!Array.isArray(p.glucoseChecks)) {
       p.glucoseChecks = [];
     }
+    p.cultures = summarized.cultures || [];
   }
 
   async function runPool(items, concurrency, worker) {
@@ -5733,6 +5745,64 @@ ${consults || "-"}
     )[0] || null;
   }
 
+  function aoeOrderEventText(row = {}) {
+    return clean([
+      orderRawName(row), row.aciklama, row.hizmetMakro?.adi, row.hizmet?.adi,
+      row.stok?.adi, row.malzeme?.adi, row.takipDirektif?.adi
+    ].filter(Boolean).join(" "));
+  }
+
+  function aoeOrderEventDate(row = {}) {
+    return row.baslangicTarihi || row.istemTarihi || row.tarih || row.kayitTarihi || row.eklemeTarihi || "";
+  }
+
+  function aoeBloodPreparationLabel(text, amount = "") {
+    const source = clean(text);
+    const hay = searchNorm(source);
+    if (!/kan\s*hazir|eritrosit|suspansiyon|süspansiyon|taze\s*donmus|tdp|trombosit|aferez/.test(hay)) return "";
+    const parts = [];
+    const component = (label, pattern) => {
+      const before = source.match(new RegExp("(\\d+)\\s*(?:adet|ünite|unite|unit|ü|u)?\\s*(?:" + pattern + ")", "i"))?.[1];
+      const after = source.match(new RegExp("(?:" + pattern + ")\\s*[:x-]?\\s*(\\d+)", "i"))?.[1];
+      const count = before || after || (/^\d+(?:[.,]\d+)?$/.test(clean(amount)) ? clean(amount).replace(/\.0+$/, "") : "");
+      const present = new RegExp("(?:" + pattern + ")", "i").test(source);
+      if (present && !parts.some((x) => x.endsWith(" " + label) || x === label)) parts.push([count, label].filter(Boolean).join(" "));
+    };
+    component("ES", "ES|eritrosit(?:\\s+süspansiyonu|\\s+suspansiyonu)?");
+    component("TDP", "TDP|taze\\s+donmuş\\s+plazma|taze\\s+donmus\\s+plazma");
+    component("TS", "TS|trombosit(?:\\s+süspansiyonu|\\s+suspansiyonu)?|aferez\\s+trombosit");
+    return parts.length ? parts.join(", ") : "Kan hazırlığı";
+  }
+
+  function aoeFollowEvents(p) {
+    const events = [];
+    const add = (group, label, date) => {
+      const value = clean(label), when = clean(date);
+      if (!value) return;
+      const key = [group, norm(value), shortDate(when)].join("|");
+      if (!events.some((x) => x.key === key)) events.push({ key, group, label:value, date:when });
+    };
+    (p.radiology || []).forEach((item) => {
+      const name = aoeImagingName(item);
+      if (name) add(1, name, item.date || item.reportDate);
+    });
+    (p.cultures || []).forEach((item) => add(2, item.name || "Kültür", item.date));
+    const sources = [
+      ...(p.orderRows || []).map((row) => ({ text:aoeOrderEventText(row), date:aoeOrderEventDate(row), amount:row.miktar || row.adet || "" })),
+      ...((p.clinicalHistory || []).map((row) => ({ text:clean(row.text || row.klinikIzlem || row.aciklama), date:row.date || row.tarih, amount:"" })))
+    ];
+    sources.forEach((item) => {
+      if (/biyopsi|tru[ -]?cut|insizyonel\s+biyopsi|eksizyonel\s+biyopsi/i.test(item.text)) add(3, "Biyopsi", item.date);
+      const blood = aoeBloodPreparationLabel(item.text, item.amount);
+      if (blood) add(4, blood, item.date);
+    });
+    return events.sort((a, b) => a.group - b.group || (parseTrDate(b.date) || 0) - (parseTrDate(a.date) || 0));
+  }
+
+  function aoeFollowEventLine(event) {
+    return (shortDate(event.date) || aoeDate(event.date) || "—") + ": " + event.label;
+  }
+
   function aoePatientKeys(p) {
     const name = norm(p.adSoyad || "").replace(/[^a-z0-9çğıöşü]+/g, "");
     return [
@@ -5880,10 +5950,13 @@ ${consults || "-"}
     const title = [doctorInitials(p.doktor), p.oda, fixed.name || p.adSoyad, aoeAgeSex(p)].filter(Boolean).join("-");
     const orders = aoeOrderLines(p.orders || []);
     const clinicalRow = aoeLatestClinical(p);
-    const clinical = clinicalRow ? [clinicalRow].map((x) =>
-      "<div><b>(" + aoeEsc(aoeDate(x.date || x.tarih) || "—") + ")</b> " +
-      aoeEsc(x.text || x.klinikIzlem || x.aciklama || "") + "</div>"
-    ).join("") : "—";
+    const followEvents = aoeFollowEvents(p);
+    const clinical = followEvents.map((event) =>
+      "<div><b>" + aoeEsc(shortDate(event.date) || aoeDate(event.date) || "—") + ":</b> " + aoeEsc(event.label) + "</div>"
+    ).join("") + (clinicalRow
+      ? "<div><b>(" + aoeEsc(aoeDate(clinicalRow.date || clinicalRow.tarih) || "—") + ")</b> " +
+        aoeEsc(clinicalRow.text || clinicalRow.klinikIzlem || clinicalRow.aciklama || "") + "</div>"
+      : "");
     const nursingRows = aoeLatestNursingRows(p);
     const nursing = nursingRows.map((x) =>
       "<div class=\"nursing-item\"><b>(" + aoeEsc(aoeDate(x.date) || "—") + ")</b> " + aoeEsc(x.text) + "</div>"
@@ -5916,7 +5989,7 @@ ${consults || "-"}
       (labTable ? '<div><b>Laboratuvar:</b></div><div class="labs">' + labTable + '</div><div class="section-gap">&nbsp;</div>' : "") +
       '<div><b>Order:</b></div>' + orders + '<div class="section-gap">&nbsp;</div>' +
       '<div><b>Gözlem:</b>' + nursing + '</div><div class="section-gap">&nbsp;</div>' +
-      '<div><b>Takip:</b>' + clinical + '</div><div class="section-gap">&nbsp;</div>' +
+      '<div><b>Takip:</b>' + (clinical || "—") + '</div><div class="section-gap">&nbsp;</div>' +
       '<div><b>Konsültasyonlar:</b>' + consults + '</div><div class="section-gap">&nbsp;</div>' +
       '<div class="imaging"><b>Görüntüleme:</b>' + imaging + '</div><div class="section-gap">&nbsp;</div>' +
       '</section><div class="patient-gap">&nbsp;<br>&nbsp;</div>';
@@ -6116,11 +6189,16 @@ ${consults || "-"}
     else paragraphs.push(aoeWordParagraph("—", { size:9 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Takip:", { size:9, bold:true, keep:true }));
+    const followEvents = aoeFollowEvents(p);
+    followEvents.forEach((event) => paragraphs.push(aoeWordRichParagraph([
+      { text:(shortDate(event.date) || aoeDate(event.date) || "—") + ": ", bold:true },
+      { text:event.label }
+    ], { size:9 })));
     const clinicalRow = aoeLatestClinical(p);
     if (clinicalRow) paragraphs.push(aoeWordParagraph(
       "(" + (aoeDate(clinicalRow.date || clinicalRow.tarih) || "—") + ") " +
       (clinicalRow.text || clinicalRow.klinikIzlem || clinicalRow.aciklama || ""), { size:9 }
-    )); else paragraphs.push(aoeWordParagraph("—", { size:9 }));
+    )); else if (!followEvents.length) paragraphs.push(aoeWordParagraph("—", { size:9 }));
     paragraphs.push(aoeWordParagraph("", { size:9 }));
     paragraphs.push(aoeWordParagraph("Konsültasyonlar:", { size:9, bold:true, keep:true }));
     const answeredConsults = (p.consults || []).filter((x) => clean(x.answer));
@@ -6213,71 +6291,47 @@ ${consults || "-"}
     const bytes = new Uint8Array(await file.arrayBuffer());
     const decoder = new TextDecoder();
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    if (bytes.length < 22) throw new Error("Geçerli bir DOCX dosyası seçin.");
-    // Word ZIP girişlerinde boyutları yerel başlık yerine veri tanımlayıcısında tutabilir.
-    // Merkezi dizin gerçek boyutu ve giriş konumunu her iki durumda da verir.
-    let end = -1;
-    for (let i = bytes.length - 22; i >= Math.max(0, bytes.length - 22 - 65535); i -= 1) {
-      if (view.getUint32(i, true) === 0x06054b50 && i + 22 + view.getUint16(i + 20, true) === bytes.length) {
-        end = i;
-        break;
-      }
+    const entries = {};
+    let eocd = -1;
+    for (let i = Math.max(0, bytes.length - 65557); i <= bytes.length - 22; i += 1) {
+      if (view.getUint32(i, true) === 0x06054b50) eocd = i;
     }
-    if (end < 0) throw new Error("DOCX içindeki ZIP dizini okunamadı.");
-    const count = view.getUint16(end + 10, true);
-    const centralSize = view.getUint32(end + 12, true);
-    const centralOffset = view.getUint32(end + 16, true);
-    if (count === 0xffff || centralSize === 0xffffffff || centralOffset === 0xffffffff) {
-      throw new Error("ZIP64 biçimindeki DOCX dosyası desteklenmiyor.");
-    }
-    if (centralOffset + centralSize > end) throw new Error("DOCX içindeki ZIP dizini bozuk.");
-    const entries = {}; let offset = centralOffset;
-    for (let i = 0; i < count; i += 1) {
-      if (offset + 46 > end || view.getUint32(offset, true) !== 0x02014b50) {
-        throw new Error("DOCX içindeki ZIP dizini bozuk.");
+    if (eocd < 0) throw new Error("Geçerli bir DOCX/ZIP merkez dizini bulunamadı");
+    const entryCount = view.getUint16(eocd + 10, true);
+    let offset = view.getUint32(eocd + 16, true);
+    for (let index = 0; index < entryCount; index += 1) {
+      if (offset + 46 > bytes.length || view.getUint32(offset, true) !== 0x02014b50) {
+        throw new Error("DOCX merkez dizini okunamadı (kayıt " + (index + 1) + ")");
       }
-      const flags = view.getUint16(offset + 8, true);
       const method = view.getUint16(offset + 10, true);
-      const crc = view.getUint32(offset + 16, true);
       const compressedSize = view.getUint32(offset + 20, true);
-      const uncompressedSize = view.getUint32(offset + 24, true);
       const nameLength = view.getUint16(offset + 28, true);
       const extraLength = view.getUint16(offset + 30, true);
       const commentLength = view.getUint16(offset + 32, true);
       const localOffset = view.getUint32(offset + 42, true);
-      const next = offset + 46 + nameLength + extraLength + commentLength;
-      if (next > end) throw new Error("DOCX içindeki ZIP dizini bozuk.");
-      const name = decoder.decode(bytes.subarray(offset + 46, offset + 46 + nameLength));
-      offset = next;
-      if (name !== "word/document.xml" && name !== "word/acil-otoexport-data.xml") continue;
-      if (flags & 1) throw new Error("Şifreli DOCX dosyası açılamıyor.");
-      if (compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff) {
-        throw new Error("ZIP64 biçimindeki DOCX dosyası desteklenmiyor.");
-      }
+      const name = decoder.decode(bytes.slice(offset + 46, offset + 46 + nameLength));
       if (localOffset + 30 > bytes.length || view.getUint32(localOffset, true) !== 0x04034b50) {
-        throw new Error("DOCX içindeki dosya başlığı bozuk.");
+        throw new Error("DOCX iç kayıt başlığı okunamadı: " + name);
       }
-      const dataStart = localOffset + 30 + view.getUint16(localOffset + 26, true) + view.getUint16(localOffset + 28, true);
-      if (dataStart + compressedSize > bytes.length) throw new Error("DOCX içindeki dosya eksik.");
-      const compressed = bytes.subarray(dataStart, dataStart + compressedSize);
+      const localNameLength = view.getUint16(localOffset + 26, true);
+      const localExtraLength = view.getUint16(localOffset + 28, true);
+      const dataStart = localOffset + 30 + localNameLength + localExtraLength;
+      const compressed = bytes.slice(dataStart, dataStart + compressedSize);
       let data = compressed;
       if (method === 8) {
-        if (typeof DecompressionStream !== "function") throw new Error("Sıkıştırılmış DOCX bu tarayıcıda açılamıyor.");
+        if (typeof DecompressionStream !== "function") throw new Error("Tarayıcı sıkıştırılmış Word dosyasını açmayı desteklemiyor");
         try {
           const stream = new Blob([compressed]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
           data = new Uint8Array(await new Response(stream).arrayBuffer());
-        } catch (e) {
-          throw new Error("DOCX içindeki sıkıştırılmış dosya açılamadı: " + name);
+        } catch (error) {
+          throw new Error("DOCX içeriği açılamadı: " + name + " (" + (error?.message || error) + ")");
         }
       } else if (method !== 0) {
         throw new Error("Desteklenmeyen DOCX sıkıştırma yöntemi: " + method);
       }
-      if (data.length !== uncompressedSize || aoeCrc32(data) !== crc) {
-        throw new Error("DOCX içindeki dosya bozuk: " + name);
-      }
       entries[name] = decoder.decode(data);
+      offset += 46 + nameLength + extraLength + commentLength;
     }
-    if (!entries["word/document.xml"]) throw new Error("DOCX içinde Word belgesi bulunamadı.");
     return entries;
   }
 
